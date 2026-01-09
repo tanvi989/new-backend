@@ -1,0 +1,241 @@
+============================================================
+🔍 DEBUG CART ITEMS
+============================================================
+
+🛒 Cart User ID: 6940fbaa9929ff4317d8853e
+  👓 Item: BERG
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 49,
+    "price": 49,
+    "lens_category": "sun",
+    "lens_package": "1.61"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+
+🛒 Cart User ID: 694167d89929ff4317d88571
+  👓 Item: MIYAMA
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 39,
+    "price": 39,
+    "lens_category": "blue",
+    "lens_package": "1.61"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+
+🛒 Cart User ID: guest_uy5ga63hj1765606282605
+  👓 Item: BERG
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 39,
+    "price": 39,
+    "lens_category": "blue",
+    "lens_package": "1.61"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 59,
+    "price": 59,
+    "lens_category": "blue",
+    "lens_package": "1.67"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 39,
+    "price": 39,
+    "lens_category": "blue",
+    "lens_package": "1.61"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 39,
+    "price": 39,
+    "lens_category": "blue",
+    "lens_package": "1.61"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+
+🛒 Cart User ID: 6937afd5d1ad549ad6b9c9b3
+  👓 Item: BERG
+     Lens Object: {
+    "id": "water-resistant",
+    "sub_category": "Water Resistant",
+    "main_category": "Progressive",
+    "selling_price": 99,
+    "price": 99,
+    "coating": "Water Resistant",
+    "coating_price": 10,
+    "lens_category": "photo",
+    "lens_package": "1.74"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 10
+     Coating Text: Water Resistant
+------------------------------
+
+🛒 Cart User ID: 693178c1e4c1e8f41c5b593e
+  👓 Item: BERG
+     Lens Object: {
+    "id": "oil-resistant",
+    "sub_category": "Oil Resistant Coating",
+    "main_category": "Progressive",
+    "selling_price": 15,
+    "price": 15,
+    "lens_package": "1.61",
+    "lens_category": "blue"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Oil Resistant Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "oil-resistant",
+    "sub_category": "Oil Resistant Coating",
+    "main_category": "Progressive",
+    "selling_price": 15,
+    "price": 15,
+    "lens_package": "1.61",
+    "lens_category": "clear"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Oil Resistant Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "anti-reflective",
+    "sub_category": "Anti Reflective Coating",
+    "main_category": "Progressive",
+    "coating": "Anti Reflective Coating",
+    "coating_price": 0,
+    "selling_price": 39,
+    "price": 39,
+    "lens_category": "blue",
+    "lens_package": "1.61"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Anti Reflective Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "oil-resistant",
+    "sub_category": "Oil Resistant Coating",
+    "main_category": "Progressive",
+    "selling_price": 15,
+    "price": 15,
+    "lens_package": "1.61",
+    "lens_category": "clear"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Oil Resistant Coating
+------------------------------
+  👓 Item: K+
+     Lens Object: {
+    "id": "water-resistant",
+    "sub_category": "Water Resistant",
+    "main_category": "Progressive",
+    "selling_price": 10,
+    "price": 10,
+    "lens_package": "1.67",
+    "lens_category": "photo"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Water Resistant
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "oil-resistant",
+    "sub_category": "Oil Resistant Coating",
+    "main_category": "Progressive",
+    "selling_price": 15,
+    "price": 15,
+    "lens_package": "1.67",
+    "lens_category": "photo"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Oil Resistant Coating
+------------------------------
+  👓 Item: BERG
+     Lens Object: {
+    "id": "water-resistant",
+    "sub_category": "Water Resistant",
+    "main_category": "Progressive",
+    "selling_price": 10,
+    "price": 10,
+    "lens_package": "1.67",
+    "lens_category": "blue"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Water Resistant
+------------------------------
+  👓 Item: LEON
+     Lens Object: {
+    "id": "water-resistant",
+    "sub_category": "Water Resistant",
+    "main_category": "Progressive",
+    "selling_price": 10,
+    "price": 10,
+    "lens_package": "1.61",
+    "lens_category": "photo"
+}
+     Calculated Coating Price: None
+     Lens['coating_price']: 0
+     Coating Text: Water Resistant
+------------------------------
+
+❌ No items with 'Water'/'Resistant'/'Coating' found in recent carts.

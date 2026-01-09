@@ -1,0 +1,36 @@
+{
+  "skuid": "PROD001",
+  "name": "Classic Black Eyeglasses",
+  "naming_system": "PROD001",
+  "brand": "Multifolks",
+  "price": 99.99,
+  "list_price": 149.99,
+  "description": "Stylish black frames perfect for everyday wear. Lightweight and comfortable design.",
+  "image": "https://storage.googleapis.com/your-bucket/images/prod001_main.jpg",
+  "images": [
+    "https://storage.googleapis.com/your-bucket/images/prod001_1.jpg",
+    "https://storage.googleapis.com/your-bucket/images/prod001_2.jpg",
+    "https://storage.googleapis.com/your-bucket/images/prod001_3.jpg"
+  ],
+  "colors": ["#000000"],
+  "color_names": ["Black"],
+  "framecolor": "Black",
+  "style": "Full Frame",
+  "gender": "Unisex",
+  "size": "Medium",
+  "material": "Acetate",
+  "shape": "Round",
+  "features": [
+    "UV Protection",
+    "Lightweight",
+    "Anti-glare coating",
+    "Scratch resistant"
+  ],
+  "variants": [],
+  "sizes": ["Small", "Medium", "Large"],
+  "primary_category": "Eyeglasses",
+  "secondary_category": "Prescription Glasses",
+  "comfort": ["Lightweight", "Flexible", "Comfortable"],
+  "is_active": true
+}
+

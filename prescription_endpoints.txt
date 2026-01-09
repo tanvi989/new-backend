@@ -1,0 +1,63 @@
+# Prescription endpoints to add to app.py
+# Add these after the profile endpoints (around line 627)
+
+# ---------- USER PRESCRIPTIONS ----------
+@app.get("/api/v1/user/prescriptions")
+async def get_user_prescriptions(current_user: dict = Depends(verify_token)):
+    """Get all saved prescriptions for the current user"""
+    if not db_connected:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    
+    try:
+        user_id = str(current_user['_id'])
+        
+        # Get prescriptions from user document
+        prescriptions = current_user.get('prescriptions', [])
+        
+        return {
+            "success": True,
+            "data": prescriptions
+        }
+    except Exception as e:
+        logger.error(f"Error fetching prescriptions: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch prescriptions")
+
+class SavePrescriptionRequest(BaseModel):
+    type: str  # 'upload', 'photo', 'manual'
+    data: Dict[str, Any]
+    name: str = "My Prescription"
+
+@app.post("/api/v1/user/prescriptions")
+async def save_user_prescription(request: SavePrescriptionRequest, current_user: dict = Depends(verify_token)):
+    """Save a new prescription to user's profile"""
+    if not db_connected:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    
+    try:
+        user_id = current_user['_id']
+        
+        # Create prescription document
+        prescription = {
+            "type": request.type,
+            "data": request.data,
+            "name": request.name,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Add prescription to user's prescriptions array
+        users_collection.update_one(
+            {"_id": user_id},
+            {
+                "$push": {"prescriptions": prescription},
+                "$set": {"updateTime": datetime.now(timezone.utc)}
+            }
+        )
+        
+        return {
+            "success": True,
+            "message": "Prescription saved successfully",
+            "data": prescription
+        }
+    except Exception as e:
+        logger.error(f"Error saving prescription: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save prescription")
