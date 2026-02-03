@@ -7,6 +7,21 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any, Dict, List
+
+# Load .env FIRST (before config) - same as Next.js/ga-admin: cwd then script dir
+from pathlib import Path
+from dotenv import load_dotenv
+# 1) From current working directory (when you "cd main-backend" then "python app.py")
+load_dotenv()
+# 2) From folder containing this file (when run from elsewhere)
+_env_file = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_env_file)
+if os.environ.get("MONGO_URI"):
+    _h = os.environ["MONGO_URI"].split("@")[-1].split("/")[0].split("?")[0] if "@" in os.environ.get("MONGO_URI", "") else "?"
+    print("MONGO_URI loaded, host:", _h)
+else:
+    print("WARNING: MONGO_URI not in environment - check .env in project folder")
+
 from fastapi import FastAPI, Request, Form, HTTPException, Depends, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -18,47 +33,66 @@ import jwt
 from google.cloud import storage
 
 # ---------- LOGGING CONFIGURATION ----------
+# Safe handler for Windows console (emojis stripped so cp1252 doesn't crash)
+class _SafeStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Strip chars that Windows cp1252 can't encode
+            msg = msg.encode("ascii", errors="replace").decode("ascii")
+            self.stream.write(msg + self.terminator)
+            self.flush()
+        except Exception:
+            self.handleError(record)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[_SafeStreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 # Force flush output immediately
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 logger.info("=" * 80)
-logger.info("🚀 MULTIFOLKS BACKEND STARTING...")
+logger.info("MULTIFOLKS BACKEND STARTING...")
 logger.info("=" * 80)
 
 # ---------- CONFIG ----------
 import config  # Must contain: MONGO_URI, DATABASE_NAME, COLLECTION_NAME, SECRET_KEY, HOST, PORT
 
+# Show which MongoDB host we're using (no password)
+try:
+    _uri = getattr(config, "MONGO_URI", "") or ""
+    if "@" in _uri:
+        _host = _uri.split("@", 1)[1].split("/")[0].split("?")[0]
+        print("MongoDB URI host:", _host, "| length:", len(_uri))
+        if "gamultilens.tuzaora" not in _uri:
+            print("WARNING: URI does not contain gamultilens.tuzaora - check .env is loaded")
+    else:
+        print("MongoDB URI host: (invalid or default) | length:", len(_uri))
+except Exception as e:
+    print("MongoDB URI check failed:", e)
+
 # ---------- APP ----------
 app = FastAPI(title="Multifolks Login API (Fixed with Multi-Route Support)")
 
-logger.info("✅ FastAPI app initialized")
+logger.info("FastAPI app initialized")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "multifolks.hiremyrecruiter.com",
-        "email.multifolks.com",
-        "https://mvp.multifolks.com"
-        
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all (localhost, newbackend.multifolks.com, any domain)
+    allow_credentials=False,  # Must be False when using "*" so browsers accept it
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
-logger.info("✅ CORS middleware configured")
+logger.info("CORS middleware configured")
 
 # ---------- REQUEST LOGGING MIDDLEWARE ----------
 @app.middleware("http")
@@ -84,93 +118,114 @@ async def log_requests(request: Request, call_next):
         logger.error(f"❌ ERROR: {request.method} {request.url.path} - {str(e)} - Duration: {duration:.3f}s")
         raise
 
-logger.info("✅ Request logging middleware configured")
+logger.info("Request logging middleware configured")
 
 # ---------- AUTH / HASH ----------
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
 
-# ---------- DATABASE ----------
+# ---------- DATABASE (same as ga-admin: lazy connect on first request, URI from env) ----------
 db_connected = False
+mongo_connection_error = None
 client = None
 db = None
 users_collection = None
 
-logger.info("📦 Connecting to MongoDB...")
-
-try:
-    client = MongoClient(
-        config.MONGO_URI,
-        serverSelectionTimeoutMS=10000,
-        connectTimeoutMS=10000,
-        socketTimeoutMS=10000,
-        retryWrites=True
-    )
-    db = client[config.DATABASE_NAME]
-    users_collection = db[config.COLLECTION_NAME]
-    client.server_info()  # Triggers connection test
-    logger.info("✅ Connected to MongoDB Atlas")
-    logger.info(f"📊 Database: {config.DATABASE_NAME}")
-    logger.info(f"👥 Collection: {config.COLLECTION_NAME}")
-    db_connected = True
-except Exception as e:
-    logger.error(f"❌ MongoDB connection failed: {e}")
-    db_connected = False
-
-# ---------- OPTIONAL SERVICES ----------
 payment_service = None
 cart_service = None
 delivery_service = None
 notification_service = None
-product_service = None  # Added ProductService
-order_service = None  # Added OrderService
-
-logger.info("🔧 Loading optional services...")
+product_service = None
+order_service = None
 
 try:
     from payment_service import StripePaymentService
     from cart_service import CartService
     from delivery_service import DeliveryService
     from notification_service import MSG91Service
-    from product_service import ProductService # Import
-    from order_service import OrderService  # Import OrderService
-    logger.info("✅ Service modules imported successfully")
+    from product_service import ProductService
+    from order_service import OrderService
 except Exception as e:
-    logger.warning(f"⚠️  Optional services not available: {e}")
+    logger.warning("Optional services not available: %s", e)
     StripePaymentService = CartService = DeliveryService = MSG91Service = ProductService = OrderService = None
 
-if db_connected:
+def ensure_db():
+    """Connect on first use (like ga-admin getDatabase()). Uses os.environ MONGO_URI like Next.js."""
+    global client, db, users_collection, db_connected, mongo_connection_error
+    global payment_service, cart_service, delivery_service, product_service, order_service, notification_service
+    if db is not None:
+        return db
+    uri = os.environ.get("MONGO_URI") or getattr(config, "MONGO_URI", None)
+    if not uri:
+        mongo_connection_error = "MONGO_URI not set. Add MONGO_URI to .env in project folder."
+        return None
     try:
-        if StripePaymentService:
-            payment_service = StripePaymentService(db)
-            logger.info("✅ Payment service initialized")
-        if CartService:
-            cart_service = CartService(db)
-            logger.info("✅ Cart service initialized")
-        if ProductService:
-            product_service = ProductService(db) # Initialize
-            logger.info("✅ Product service initialized")
-        if OrderService:
-            order_service = OrderService(db)  # Initialize OrderService
-            logger.info("✅ Order service initialized")
-
-        delivery_config = {
-            'BLUEDART_BASE_URL': getattr(config, 'BLUEDART_BASE_URL', None),
-            'BLUEDART_CUSTOMER_CODE': getattr(config, 'BLUEDART_CUSTOMER_CODE', None),
-            'BLUEDART_LOGIN_ID': getattr(config, 'BLUEDART_LOGIN_ID', None),
-            'BLUEDART_LICENSE_KEY': getattr(config, 'BLUEDART_LICENSE_KEY', None),
-            'WAREHOUSE_PINCODE': getattr(config, 'WAREHOUSE_PINCODE', None),
-            'WAREHOUSE_ADDRESS': getattr(config, 'WAREHOUSE_ADDRESS', None),
-        }
-        if DeliveryService:
-            delivery_service = DeliveryService(db, delivery_config)
-        if MSG91Service:
-            notification_service = MSG91Service()
-        print("External services initialized")
+        client = MongoClient(
+            uri,
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            retryWrites=True,
+        )
+        db = client[config.DATABASE_NAME]
+        users_collection = db[config.COLLECTION_NAME]
+        client.server_info()
+        db_connected = True
+        mongo_connection_error = None
+        logger.info("MongoDB connected (lazy): %s | %s", config.DATABASE_NAME, config.COLLECTION_NAME)
+        try:
+            if StripePaymentService:
+                payment_service = StripePaymentService(db)
+            if CartService:
+                cart_service = CartService(db)
+            if ProductService:
+                product_service = ProductService(db)
+            if OrderService:
+                order_service = OrderService(db)
+            if DeliveryService:
+                delivery_config = {
+                    "BLUEDART_BASE_URL": getattr(config, "BLUEDART_BASE_URL", None),
+                    "BLUEDART_CUSTOMER_CODE": getattr(config, "BLUEDART_CUSTOMER_CODE", None),
+                    "BLUEDART_LOGIN_ID": getattr(config, "BLUEDART_LOGIN_ID", None),
+                    "BLUEDART_LICENSE_KEY": getattr(config, "BLUEDART_LICENSE_KEY", None),
+                    "WAREHOUSE_PINCODE": getattr(config, "WAREHOUSE_PINCODE", None),
+                    "WAREHOUSE_ADDRESS": getattr(config, "WAREHOUSE_ADDRESS", None),
+                }
+                delivery_service = DeliveryService(db, delivery_config)
+            if MSG91Service:
+                notification_service = MSG91Service()
+        except Exception as e:
+            logger.warning("Some services failed to init: %s", e)
+        return db
     except Exception as e:
-        print("Failed to initialize external services:", e)
+        mongo_connection_error = str(e)
+        db_connected = False
+        print("")
+        print("=" * 60)
+        print("MONGODB DISCONNECTED - REAL REASON:")
+        print("=" * 60)
+        print(mongo_connection_error)
+        print("=" * 60)
+        print("")
+        sys.stdout.flush()
+        return None
+
+@app.middleware("http")
+async def ensure_db_middleware(request: Request, call_next):
+    ensure_db()
+    return await call_next(request)
 
 # ... (Existing Code) ...
+
+# ---------- ROOT ----------
+@app.get("/")
+async def root():
+    return {
+        "message": "Multifolks API",
+        "docs": "/docs",
+        "health": "/api/health",
+        "redoc": "/redoc"
+    }
 
 # ---------- PRODUCT ENDPOINTS ----------
 @app.get("/api/v1/products/all")
@@ -1486,29 +1541,6 @@ async def stripe_webhook(request: Request):
         )
     return {"success": True}
 
-# ---------- PAYMENT ENDPOINTS ----------
-@app.post("/api/v1/payment/create-session")
-async def create_payment_session(request: CreatePaymentSessionRequest, current_user: dict = Depends(verify_token)):
-    if not payment_service:
-        raise HTTPException(status_code=503, detail="Payment service unavailable")
-    
-    # Ensure user_id matches token
-    user_id = str(current_user['_id'])
-    user_email = current_user['email']
-    
-    result = payment_service.create_checkout_session(
-        order_id=request.order_id,
-        amount=request.amount,
-        user_email=user_email,
-        user_id=user_id,
-        metadata=request.metadata
-    )
-    
-    if not result.get('success'):
-        raise HTTPException(status_code=400, detail=result)
-        
-    return result
-
 # ---------- DELIVERY ENDPOINTS ----------
 @app.post("/api/v1/delivery/check-pincode")
 async def check_pincode(request: CheckPincodeRequest):
@@ -1530,9 +1562,6 @@ async def create_shipment(request: CreateShipmentRequest, current_user: dict = D
 async def track_shipment(awb_number: str):
     if not delivery_service:
         raise HTTPException(status_code=503, detail="Delivery service unavailable")
-        
-    return delivery_service.get_shipment_status(awb_number)
-
     return delivery_service.get_shipment_status(awb_number)
 
 # ---------- PRODUCT ENDPOINTS ----------
@@ -1835,19 +1864,19 @@ async def get_filter_options():
     
     # Get all unique comfort features (since it's an array field)
     comfort_pipeline = [
-        {"": ""},
-        {"": {"_id": ""}},
-        {"": {"_id": 1}}
+        {"$unwind": "$comfort"},
+        {"$group": {"_id": "$comfort"}},
+        {"$sort": {"_id": 1}}
     ]
     comfort_results = list(products_collection.aggregate(comfort_pipeline))
     comfort_options = [r["_id"] for r in comfort_results if r["_id"]]
     
     # Get price range
     price_pipeline = [
-        {"": {
+        {"$group": {
             "_id": None,
-            "min_price": {"": ""},
-            "max_price": {"": ""}
+            "min_price": {"$min": "$price"},
+            "max_price": {"$max": "$price"}
         }}
     ]
     price_result = list(products_collection.aggregate(price_pipeline))
@@ -2135,12 +2164,24 @@ async def login_with_pin(request: LoginWithPinRequest):
 @app.get("/health")
 async def health_check():
     user_count = users_collection.count_documents({}) if db_connected else None
-    return {
+    out = {
         "success": True,
         "message": "API is running",
         "mongodb": "connected" if db_connected else "disconnected",
         "total_users": user_count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if not db_connected and mongo_connection_error:
+        out["mongodb_error"] = mongo_connection_error
+    return out
+
+
+@app.get("/api/why-disconnected")
+async def why_disconnected():
+    """Returns the exact reason MongoDB is disconnected."""
+    return {
+        "mongodb": "connected" if db_connected else "disconnected",
+        "reason": mongo_connection_error if (not db_connected and mongo_connection_error) else None,
     }
 
 # ---------- RECENTLY VIEWED ----------
@@ -2204,63 +2245,6 @@ async def add_recently_viewed(request: RecentlyViewedRequest, token: str = Depen
         print(f"Error adding recently viewed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ---------- PRESCRIPTIONS ----------
-class PrescriptionData(BaseModel):
-    type: str # 'manual', 'upload', 'photo'
-    data: Dict[str, Any]
-    name: Optional[str] = "My Prescription"
-
-@app.get("/api/v1/user/prescriptions")
-async def get_prescriptions(token: str = Depends(security)):
-    if not db_connected:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-        
-    try:
-        payload = jwt.decode(token.credentials, config.SECRET_KEY, algorithms=["HS256"])
-        user_email = payload.get("sub")
-        
-        user = users_collection.find_one({"email": user_email})
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-            
-        prescriptions = user.get("saved_prescriptions", [])
-        
-        return {"success": True, "data": prescriptions}
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except Exception as e:
-        print(f"Error fetching prescriptions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/user/prescriptions")
-async def save_prescription(request: PrescriptionData, token: str = Depends(security)):
-    if not db_connected:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-        
-    try:
-        payload = jwt.decode(token.credentials, config.SECRET_KEY, algorithms=["HS256"])
-        user_email = payload.get("sub")
-        
-        prescription_entry = {
-            "id": str(ObjectId()),
-            "type": request.type,
-            "data": request.data,
-            "name": request.name,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        
-        users_collection.update_one(
-            {"email": user_email},
-            {"$push": {"saved_prescriptions": prescription_entry}}
-        )
-        
-        return {"success": True, "msg": "Prescription saved", "id": prescription_entry["id"]}
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except Exception as e:
-        print(f"Error saving prescription: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 if __name__ == "__main__":
     import uvicorn
     
@@ -2291,62 +2275,4 @@ if __name__ == "__main__":
         port=getattr(config, "PORT", 5000),
         log_level="info"
     )
-
-
-# ---------- FILTER OPTIONS ENDPOINT ----------
-@app.get("/api/v1/products/filters/options")
-async def get_filter_options():
-    """
-    Get all available filter options from the database
-    Returns unique values for each filterable field
-    """
-    if not db_connected:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-    
-    products_collection = db['products']
-    
-    # Get unique values for each filter field
-    brands = products_collection.distinct("brand")
-    genders = products_collection.distinct("gender")
-    materials = products_collection.distinct("material")
-    styles = products_collection.distinct("style")
-    sizes = products_collection.distinct("size")
-    frame_colors = products_collection.distinct("frame_color")
-    
-    # Get all unique comfort features (since it's an array field)
-    comfort_pipeline = [
-        {"$unwind": "$comfort"},
-        {"$group": {"_id": "$comfort"}},
-        {"$sort": {"_id": 1}}
-    ]
-    comfort_results = list(products_collection.aggregate(comfort_pipeline))
-    comfort_options = [r["_id"] for r in comfort_results if r["_id"]]
-    
-    # Get price range
-    price_pipeline = [
-        {"$group": {
-            "_id": None,
-            "min_price": {"$min": "$price"},
-            "max_price": {"$max": "$price"}
-        }}
-    ]
-    price_result = list(products_collection.aggregate(price_pipeline))
-    price_range = price_result[0] if price_result else {"min_price": 0, "max_price": 500}
-    
-    return {
-        "success": True,
-        "data": {
-            "brands": sorted([b for b in brands if b]),
-            "genders": sorted([g for g in genders if g]),
-            "materials": sorted([m for m in materials if m]),
-            "styles": sorted([s for s in styles if s]),
-            "sizes": sorted([sz for sz in sizes if sz]),
-            "frame_colors": sorted([fc for fc in frame_colors if fc]),
-            "comfort": sorted(comfort_options),
-            "price_range": {
-                "min": price_range.get("min_price", 0),
-                "max": price_range.get("max_price", 500)
-            }
-        }
-    }
 

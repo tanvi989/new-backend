@@ -2,7 +2,7 @@ import requests
 import json
 
 # Test the merge-guest-cart endpoint
-url = "http://localhost:5000/api/v1/cart/merge-guest-cart"
+url = "https://mvp.multifolks.com/http://localhost:5000/api/v1/cart/merge-guest-cart"
 
 # You'll need to replace this with a real token from your browser's localStorage
 token = "YOUR_TOKEN_HERE"  # Get from localStorage.getItem('token')
