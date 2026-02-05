@@ -21,18 +21,18 @@ class CartService:
     def get_cart(self, user_id: str) -> Dict[str, Any]:
         try:
             print(f"\n{'='*80}")
-            print(f"📥 GET_CART DEBUG - User: {user_id}")
+            print(f"[GET_CART] User: {user_id}")
             print(f"{'='*80}")
             cart = self.collection.find_one({"user_id": str(user_id)})
             
             if cart:
-                print(f"✅ Cart document found")
+                print(f"[OK] Cart document found")
                 print(f"   - Cart document keys: {list(cart.keys())}")
             else:
-                print(f"❌ No cart document found for user")
+                print(f"[WARN] No cart document found for user")
 
             items = cart.get("items", []) if cart else []
-            print(f"📦 Items in cart: {len(items)}")
+            print(f"[CART] Items in cart: {len(items)}")
             
             for idx, item in enumerate(items):
                 print(f"\n   Item {idx + 1}:")
@@ -70,9 +70,9 @@ class CartService:
             
             # DEBUG: Log received data
             print(f"\n{'='*80}")
-            print(f"🛒 ADD_TO_CART DEBUG - User: {user_id}")
+            print(f"[ADD_CART] ADD_TO_CART DEBUG - User: {user_id}")
             print(f"{'='*80}")
-            print(f"📦 Received item_data keys: {list(item_data.keys())}")
+            print(f"[ADD_CART] Received item_data keys: {list(item_data.keys())}")
             print(f"   - product_id: {item_data.get('product_id')}")
             print(f"   - name: {item_data.get('name')}")
             print(f"   - price: {item_data.get('price')}")
@@ -87,7 +87,7 @@ class CartService:
 
             # Required fields check
             if "product_id" not in item_data or "price" not in item_data:
-                print(f"❌ Missing required fields!")
+                print(f"[ERR] Missing required fields!")
                 return {
                     "success": False,
                     "message": "Missing required fields: product_id or price"
@@ -153,7 +153,7 @@ class CartService:
                 item_data["added_at"] = now
                 
                 # DEBUG: Log what we're about to save
-                print(f"\n💾 SAVING TO MONGODB:")
+                print(f"\n[SAVE] SAVING TO MONGODB:")
                 print(f"   - cart_id: {item_data['cart_id']}")
                 print(f"   - Fields being saved: {list(item_data.keys())}")
                 print(f"   - product field present: {'product' in item_data}")
@@ -182,7 +182,7 @@ class CartService:
                 print(f"   - MongoDB matched_count: {result.matched_count}")
                 print(f"   - MongoDB modified_count: {result.modified_count}")
                 print(f"   - MongoDB upserted_id: {result.upserted_id}")
-                print(f"✅ Item saved to cart!\n")
+                print(f"[OK] Item saved to cart!\n")
 
                 return {
                     "success": True,
@@ -345,8 +345,8 @@ class CartService:
     def update_lens(self, user_id: str, cart_id: int, lens_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
             print(f"\n{'='*80}")
-            print(f"🔧 UPDATE_LENS - User: {user_id}, Cart ID: {cart_id}")
-            print(f"📦 Received lens_data keys: {list(lens_data.keys())}")
+            print(f"[UPDATE_LENS] User: {user_id}, Cart ID: {cart_id}")
+            print(f"[UPDATE_LENS] Received lens_data keys: {list(lens_data.keys())}")
             print(f"{'='*80}")
             
             # Find the item to get current frame price
@@ -364,17 +364,17 @@ class CartService:
             # Frontend sends 'lensPackagePrice' -> Backend needs 'selling_price'
             if "selling_price" not in lens_data and "lensPackagePrice" in lens_data:
                 lens_data["selling_price"] = lens_data["lensPackagePrice"]
-                print(f"✅ Mapped lensPackagePrice -> selling_price: {lens_data['selling_price']}")
+                print(f"[OK] Mapped lensPackagePrice -> selling_price: {lens_data['selling_price']}")
             
             # Frontend sends 'priceValue' (for coating) -> Backend needs 'coating_price'
             if "coating_price" not in lens_data and "priceValue" in lens_data:
                 lens_data["coating_price"] = lens_data["priceValue"]
-                print(f"✅ Mapped priceValue -> coating_price: {lens_data['coating_price']}")
+                print(f"[OK] Mapped priceValue -> coating_price: {lens_data['coating_price']}")
             
             # Frontend sends 'tintPrice' (for sunglasses) -> Backend needs 'tint_price'
             if "tint_price" not in lens_data and "tintPrice" in lens_data:
                 lens_data["tint_price"] = lens_data["tintPrice"]
-                print(f"✅ Mapped tintPrice -> tint_price: {lens_data['tint_price']}")
+                print(f"[OK] Mapped tintPrice -> tint_price: {lens_data['tint_price']}")
             
             # Ensure tint_price defaults to 0 if not present
             if "tint_price" not in lens_data:
@@ -385,7 +385,7 @@ class CartService:
                 lens_data["coating_price"] = 0
             # -----------------------------------------------
             
-            print(f"\n💰 PRICE CALCULATION:")
+            print(f"\n[PRICE] PRICE CALCULATION:")
             print(f"   Lens data after mapping:")
             print(f"   - selling_price: {lens_data.get('selling_price', 0)}")
             print(f"   - coating_price: {lens_data.get('coating_price', 0)}")
@@ -442,14 +442,14 @@ class CartService:
             )
             
             if result.modified_count:
-                print(f"✅ Lens updated successfully for cart_id {cart_id}")
+                print(f"[OK] Lens updated successfully for cart_id {cart_id}")
                 return {"success": True, "message": "Lens updated successfully"}
             else:
-                print(f"❌ Failed to update lens for cart_id {cart_id}")
+                print(f"[ERR] Failed to update lens for cart_id {cart_id}")
                 return {"success": False, "message": "Failed to update lens"}
                 
         except Exception as e:
-            print(f"❌ UPDATE_LENS ERROR: {str(e)}")
+            print(f"[ERR] UPDATE_LENS ERROR: {str(e)}")
             return {"success": False, "error": f"Update lens failed: {str(e)}"}
 
     # ------------------------------

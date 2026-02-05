@@ -29,13 +29,13 @@ class MSG91Service:
         Returns:
             dict: Response with success status and data/error message
         """
-        logger.info(f"📧 MSG91: Preparing to send email")
+        logger.info(f"[MSG91] Preparing to send email")
         logger.info(f"   Template: {template_id}")
         logger.info(f"   To: {to_email}")
         logger.info(f"   Variables: {list(variables.keys())}")
         
         if not self.auth_key or not self.domain:
-            logger.error("❌ MSG91 credentials not configured")
+            logger.error("[ERR] MSG91 credentials not configured")
             return {"success": False, "msg": "MSG91 not configured"}
 
         payload = {
@@ -63,35 +63,35 @@ class MSG91Service:
             "Content-Type": "application/json"
         }
         
-        logger.info(f"📤 MSG91: Sending request to {self.base_url}")
+        logger.info(f"[MSG91] Sending request to {self.base_url}")
 
         try:
             response = requests.post(self.base_url, json=payload, headers=headers)
-            logger.info(f"📥 MSG91: Response status {response.status_code}")
+            logger.info(f"[MSG91] Response status {response.status_code}")
             
             if response.status_code == 200:
                 response_data = response.json()
                 unique_id = response_data.get('data', {}).get('unique_id', 'N/A')
-                logger.info(f"✅ MSG91: Email queued successfully")
+                logger.info(f"[OK] MSG91: Email queued successfully")
                 logger.info(f"   Unique ID: {unique_id}")
                 logger.info(f"   Message: {response_data.get('message', 'N/A')}")
                 return {"success": True, "data": response_data}
             else:
-                logger.error(f"❌ MSG91: Failed with status {response.status_code}")
+                logger.error(f"[ERR] MSG91: Failed with status {response.status_code}")
                 logger.error(f"   Response: {response.text}")
                 return {"success": False, "msg": f"Failed to send email: {response.text}"}
         except Exception as e:
-            logger.error(f"❌ MSG91: Exception occurred: {str(e)}")
+            logger.error(f"[ERR] MSG91: Exception occurred: {str(e)}")
             return {"success": False, "msg": str(e)}
 
     def send_login_pin(self, email: str, pin: str, name: str = None):
         """
         Send login PIN via email.
         """
-        logger.info(f"🔐 MSG91: Sending login PIN to {email}")
+        logger.info(f"[MSG91] Sending login PIN to {email}")
         template_id = config.MSG91_TEMPLATE_ID
         if not template_id:
-            logger.error("❌ MSG91_TEMPLATE_ID not configured")
+            logger.error("[ERR] MSG91_TEMPLATE_ID not configured")
             return {"success": False, "msg": "Template ID missing"}
             
         variables = {
@@ -110,10 +110,10 @@ class MSG91Service:
         """
         Send password reset PIN via email.
         """
-        logger.info(f"🔄 MSG91: Sending password reset PIN to {email}")
+        logger.info(f"[MSG91] Sending password reset PIN to {email}")
         template_id = config.MSG91_RESET_TEMPLATE_ID or config.MSG91_TEMPLATE_ID
         if not template_id:
-            logger.error("❌ MSG91_RESET_TEMPLATE_ID not configured")
+            logger.error("[ERR] MSG91_RESET_TEMPLATE_ID not configured")
             return {"success": False, "msg": "Template ID missing"}
             
         variables = {
@@ -129,10 +129,10 @@ class MSG91Service:
         """
         Send welcome email to new users.
         """
-        logger.info(f"👋 MSG91: Sending welcome email to {email}")
+        logger.info(f"[MSG91] Sending welcome email to {email}")
         template_id = config.MSG91_WELCOME_TEMPLATE_ID
         if not template_id:
-            logger.error("❌ MSG91_WELCOME_TEMPLATE_ID not configured")
+            logger.error("[ERR] MSG91_WELCOME_TEMPLATE_ID not configured")
             return {"success": False, "msg": "Welcome template ID missing"}
             
         variables = {
@@ -151,11 +151,11 @@ class MSG91Service:
         """
         Send order confirmation email.
         """
-        logger.info(f"📦 MSG91: Sending order confirmation to {email}")
+        logger.info(f"[MSG91] Sending order confirmation to {email}")
         logger.info(f"   Order ID: {order_id}, Total: {order_total}")
         template_id = config.MSG91_ORDER_TEMPLATE_ID
         if not template_id:
-            logger.error("❌ MSG91_ORDER_TEMPLATE_ID not configured")
+            logger.error("[ERR] MSG91_ORDER_TEMPLATE_ID not configured")
             return {"success": False, "msg": "Order template ID missing"}
             
         variables = {

@@ -86,7 +86,7 @@ class ProductService:
             query["is_active"] = True
 
             print(f"DEBUG: Product Query: {query}")
-            with open("debug_queries.log", "a") as f:
+            with open("debug_queries.log", "a", encoding="utf-8") as f:
                 f.write(f"Query: {query} | Filters: {filters}\n")
 
             # Execute Query with pagination

@@ -4,18 +4,24 @@ import traceback
 import logging
 import sys
 import os
+
+# Fix Windows console encoding - allows emojis/unicode in print() without UnicodeEncodeError
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any, Dict, List
 
-# Load .env FIRST (before config) - same as Next.js/ga-admin: cwd then script dir
+# Load .env FIRST (before config) - script dir so it works from any cwd; override=True so project .env wins over system env
 from pathlib import Path
 from dotenv import load_dotenv
-# 1) From current working directory (when you "cd main-backend" then "python app.py")
-load_dotenv()
-# 2) From folder containing this file (when run from elsewhere)
 _env_file = Path(__file__).resolve().parent / ".env"
-load_dotenv(dotenv_path=_env_file)
+load_dotenv(dotenv_path=_env_file, override=True)
+load_dotenv(override=False)  # cwd .env as fallback (don't override script .env)
 if os.environ.get("MONGO_URI"):
     _h = os.environ["MONGO_URI"].split("@")[-1].split("/")[0].split("?")[0] if "@" in os.environ.get("MONGO_URI", "") else "?"
     print("MONGO_URI loaded, host:", _h)
@@ -29,6 +35,7 @@ from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from pymongo import MongoClient
 from bson import ObjectId
+import certifi
 import jwt
 from google.cloud import storage
 
@@ -99,8 +106,8 @@ logger.info("CORS middleware configured")
 async def log_requests(request: Request, call_next):
     start_time = datetime.now()
     
-    # Log incoming request
-    logger.info(f"🔵 INCOMING: {request.method} {request.url.path}")
+    # Log incoming request (ASCII only for Windows compatibility)
+    logger.info(f"[INCOMING] {request.method} {request.url.path}")
     
     try:
         response = await call_next(request)
@@ -109,13 +116,13 @@ async def log_requests(request: Request, call_next):
         duration = (datetime.now() - start_time).total_seconds()
         
         # Log response
-        status_emoji = "✅" if response.status_code < 400 else "❌"
-        logger.info(f"{status_emoji} RESPONSE: {request.method} {request.url.path} - Status: {response.status_code} - Duration: {duration:.3f}s")
+        status_str = "[OK]" if response.status_code < 400 else "[ERR]"
+        logger.info(f"{status_str} RESPONSE: {request.method} {request.url.path} - Status: {response.status_code} - Duration: {duration:.3f}s")
         
         return response
     except Exception as e:
         duration = (datetime.now() - start_time).total_seconds()
-        logger.error(f"❌ ERROR: {request.method} {request.url.path} - {str(e)} - Duration: {duration:.3f}s")
+        logger.error(f"[ERROR] {request.method} {request.url.path} - {str(e)} - Duration: {duration:.3f}s")
         raise
 
 logger.info("Request logging middleware configured")
@@ -150,26 +157,54 @@ except Exception as e:
     StripePaymentService = CartService = DeliveryService = MSG91Service = ProductService = OrderService = None
 
 def ensure_db():
-    """Connect on first use (like ga-admin getDatabase()). Uses os.environ MONGO_URI like Next.js."""
+    """Connect on first use. Uses config.MONGO_URI (loaded from .env in config.py) - never system env localhost."""
     global client, db, users_collection, db_connected, mongo_connection_error
     global payment_service, cart_service, delivery_service, product_service, order_service, notification_service
     if db is not None:
         return db
-    uri = os.environ.get("MONGO_URI") or getattr(config, "MONGO_URI", None)
-    if not uri:
-        mongo_connection_error = "MONGO_URI not set. Add MONGO_URI to .env in project folder."
+    uri = getattr(config, "MONGO_URI", None) or os.environ.get("MONGO_URI")
+    if not uri or (isinstance(uri, str) and "localhost" in uri):
+        mongo_connection_error = "MONGO_URI not set or points to localhost. Set MONGO_URI in newbackend/.env to your Atlas URI."
         return None
-    try:
-        client = MongoClient(
-            uri,
+    sep = "&" if "?" in uri else "?"
+    uri_with_opts = uri.rstrip("/") + sep + "tlsDisableOCSPEndpointCheck=true"
+    def _connect(use_uri, tls_ca_file=None, tls_allow_invalid=False):
+        kw = dict(
             serverSelectionTimeoutMS=30000,
             connectTimeoutMS=30000,
             socketTimeoutMS=30000,
             retryWrites=True,
         )
+        if tls_ca_file:
+            kw["tlsCAFile"] = tls_ca_file
+        if tls_allow_invalid:
+            kw["tlsAllowInvalidCertificates"] = True
+            kw["tlsAllowInvalidHostnames"] = True
+        return MongoClient(use_uri, **kw)
+
+    try:
+        attempts = [
+            ("CA bundle", lambda: _connect(uri_with_opts, tls_ca_file=certifi.where())),
+            ("tlsAllowInvalidCertificates", lambda: _connect(uri_with_opts + "&tlsAllowInvalidCertificates=true", tls_allow_invalid=True)),
+        ]
+        client = None
+        last_err = None
+        for name, connect_fn in attempts:
+            try:
+                c = connect_fn()
+                c.server_info()  # force connection now
+                client = c
+                break
+            except Exception as e:
+                last_err = e
+                if "SSL" in str(e) or "TLS" in str(e) or "handshake" in str(e).lower():
+                    logger.warning("MongoDB TLS failed (%s), trying next option", name)
+                    continue
+                raise
+        if client is None and last_err:
+            raise last_err
         db = client[config.DATABASE_NAME]
         users_collection = db[config.COLLECTION_NAME]
-        client.server_info()
         db_connected = True
         mongo_connection_error = None
         logger.info("MongoDB connected (lazy): %s | %s", config.DATABASE_NAME, config.COLLECTION_NAME)
@@ -315,8 +350,8 @@ def decode_jwt_token(token: str) -> Dict[str, Any]:
 # ---------- TOKEN DEPENDENCY ----------
 # ---------- TOKEN DEPENDENCY ----------
 def verify_token(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    request: Request = None
 ):
     # Check for Guest ID first if no credentials
     if not credentials:
@@ -499,7 +534,7 @@ async def unified_auth(
         # Registration path (for /simple-register/, /unified, /auth/)
         if is_register_route:
             print(f"\n{'='*60}")
-            print(f"📝 REGISTRATION REQUEST RECEIVED")
+            print(f"[REG] REGISTRATION REQUEST RECEIVED")
             print(f"{'='*60}")
             if not all([first_name, mobile, password]):
                 raise HTTPException(status_code=400, detail={"success": False, "status": 4000, "msg": "Missing required fields for registration"})
@@ -556,12 +591,12 @@ async def unified_auth(
             result = users_collection.insert_one(user_doc)
             token = generate_jwt_token(str(result.inserted_id), email_to_use)
             
-            print(f"✅ User created successfully: {email_to_use}")
+            print(f"[OK] User created successfully: {email_to_use}")
             print(f"   User ID: {result.inserted_id}")
             print(f"   Name: {first_name} {last_name}")
 
             # Send welcome email
-            print(f"\n📧 ATTEMPTING TO SEND WELCOME EMAIL")
+            print(f"\n[EMAIL] ATTEMPTING TO SEND WELCOME EMAIL")
             print(f"   Notification service available: {notification_service is not None}")
             
             if notification_service:
@@ -574,18 +609,18 @@ async def unified_auth(
                     
                     print(f"   Email send result: {result_email}")
                     if result_email.get('success'):
-                        print(f"   ✅ Welcome email sent successfully!")
+                        print(f"   [OK] Welcome email sent successfully!")
                         unique_id = result_email.get('data', {}).get('data', {}).get('unique_id', 'N/A')
                         print(f"   MSG91 Unique ID: {unique_id}")
                     else:
-                        print(f"   ❌ Welcome email failed: {result_email.get('msg')}")
+                        print(f"   [ERR] Welcome email failed: {result_email.get('msg')}")
                         
                 except Exception as e:
-                    print(f"   ❌ Exception sending welcome email: {e}")
+                    print(f"   [ERR] Exception sending welcome email: {e}")
                     import traceback
                     print(f"   Traceback: {traceback.format_exc()}")
             else:
-                print(f"   ⚠️  Notification service not initialized!")
+                print(f"   [WARN] Notification service not initialized!")
             
             print(f"{'='*60}\n")
 
@@ -740,7 +775,7 @@ async def get_user_prescriptions(current_user: dict = Depends(verify_token)):
         # Get prescriptions from user document
         prescriptions = current_user.get('prescriptions', [])
         
-        logger.info(f"📋 Fetching prescriptions for user {user_id}")
+        logger.info(f"[RX] Fetching prescriptions for user {user_id}")
         logger.info(f"   Found {len(prescriptions)} prescriptions")
         
         # Log prescription details for debugging
@@ -772,12 +807,12 @@ async def upload_prescription_image(
     (will be automatically included when adding product to cart)
     """
     try:
-        logger.info(f"📤 Prescription upload request - File: {file.filename}, Content-Type: {file.content_type}, User ID: {user_id}, Guest ID: {guest_id}")
+        logger.info(f"[UPLOAD] Prescription upload request - File: {file.filename}, Content-Type: {file.content_type}, User ID: {user_id}, Guest ID: {guest_id}")
         
         # Validate file type
         allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp", "application/pdf"]
         if file.content_type not in allowed_types:
-            logger.error(f"❌ Invalid file type: {file.content_type}")
+            logger.error(f"[ERR] Invalid file type: {file.content_type}")
             raise HTTPException(status_code=400, detail=f"Invalid file type '{file.content_type}'. Allowed: {', '.join(allowed_types)}")
         
         # Generate unique filename
@@ -789,45 +824,45 @@ async def upload_prescription_image(
         filename = f"{timestamp}_{unique_id}.{file_extension}"
         gcs_path = f"prescriptions/{identifier}/{filename}"
         
-        logger.info(f"📝 Generated GCS path: {gcs_path}")
+        logger.info(f"[GCS] Generated GCS path: {gcs_path}")
         
         # Initialize GCS client
         gcs_credentials_path = os.path.join(os.path.dirname(__file__), "gcs-service-account.json")
-        logger.info(f"🔑 Looking for GCS credentials at: {gcs_credentials_path}")
+        logger.info(f"[GCS] Looking for credentials at: {gcs_credentials_path}")
         
         if not os.path.exists(gcs_credentials_path):
-            logger.error(f"❌ GCS credentials file not found at: {gcs_credentials_path}")
+            logger.error(f"[ERR] GCS credentials file not found at: {gcs_credentials_path}")
             raise HTTPException(status_code=500, detail="GCS credentials not found. Please contact support.")
         
-        logger.info(f"✓ GCS credentials file found")
+        logger.info(f"[OK] GCS credentials file found")
         
         try:
             storage_client = storage.Client.from_service_account_json(gcs_credentials_path)
-            logger.info(f"✓ GCS client initialized")
+            logger.info(f"[OK] GCS client initialized")
         except Exception as gcs_error:
-            logger.error(f"❌ Failed to initialize GCS client: {str(gcs_error)}")
+            logger.error(f"[ERR] Failed to initialize GCS client: {str(gcs_error)}")
             raise HTTPException(status_code=500, detail=f"Failed to initialize cloud storage: {str(gcs_error)}")
         
         bucket = storage_client.bucket("myapp-image-bucket-001")
         blob = bucket.blob(gcs_path)
         
         # Upload file
-        logger.info(f"⬆️  Uploading file to GCS...")
+        logger.info(f"[GCS] Uploading file to GCS...")
         file_content = await file.read()
         file_size = len(file_content)
-        logger.info(f"📦 File size: {file_size} bytes ({file_size / 1024:.2f} KB)")
+        logger.info(f"[GCS] File size: {file_size} bytes ({file_size / 1024:.2f} KB)")
         
         if file_size == 0:
-            logger.error(f"❌ File is empty")
+            logger.error(f"[ERR] File is empty")
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
         
         blob.upload_from_string(file_content, content_type=file.content_type)
-        logger.info(f"✓ File uploaded to GCS successfully")
+        logger.info(f"[OK] File uploaded to GCS successfully")
         
         # Generate public URL
         public_url = f"https://storage.googleapis.com/myapp-image-bucket-001/{gcs_path}"
         
-        logger.info(f"✅ Prescription image uploaded successfully: {public_url}")
+        logger.info(f"[OK] Prescription image uploaded successfully: {public_url}")
         
         # If product_id provided and user is authenticated, store as pending prescription
         response_data = {
@@ -852,14 +887,14 @@ async def upload_prescription_image(
                     authenticated_user = users_collection.find_one({"email": email})
                     if authenticated_user:
                         final_user_id = str(authenticated_user['_id'])
-                        logger.info(f"✅ Using authenticated user ID: {final_user_id}")
+                        logger.info(f"[OK] Using authenticated user ID: {final_user_id}")
         except Exception as e:
             # Auth is optional for this endpoint
             logger.debug(f"Optional auth check failed: {e}")
         
         if not final_user_id and user_id:
             final_user_id = user_id
-            logger.info(f"✅ Using form user_id: {final_user_id}")
+            logger.info(f"[OK] Using form user_id: {final_user_id}")
         
         if product_id and final_user_id and db_connected:
             try:
@@ -878,7 +913,7 @@ async def upload_prescription_image(
                     user_obj_id = ObjectId(final_user_id) if isinstance(final_user_id, str) else final_user_id
                 except:
                     # If conversion fails, try to find user by email or other identifier
-                    logger.warning(f"⚠️  Could not convert {final_user_id} to ObjectId")
+                    logger.warning(f"[WARN] Could not convert {final_user_id} to ObjectId")
                     user_obj_id = final_user_id
                 
                 # Store as pending prescription for this product
@@ -893,19 +928,19 @@ async def upload_prescription_image(
                 )
                 
                 if update_result.matched_count > 0:
-                    logger.info(f"✅ Prescription stored as pending for product {product_id}")
+                    logger.info(f"[OK] Prescription stored as pending for product {product_id}")
                     response_data["message"] = "Prescription uploaded and will be included when adding to cart"
                 else:
-                    logger.warning(f"⚠️  User not found, prescription uploaded but not linked to product")
+                    logger.warning(f"[WARN] User not found, prescription uploaded but not linked to product")
             except Exception as e:
-                logger.warning(f"⚠️  Failed to store pending prescription: {e}")
+                logger.warning(f"[WARN] Failed to store pending prescription: {e}")
         
         return response_data
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Unexpected error uploading prescription image: {str(e)}")
+        logger.error(f"[ERR] Unexpected error uploading prescription image: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
@@ -947,7 +982,7 @@ async def save_user_prescription(request: SavePrescriptionRequest, current_user:
             }
         )
         
-        logger.info(f"✅ Prescription saved for user {user_id}: type={request.type}, has_image={bool(request.image_url)}")
+        logger.info(f"[OK] Prescription saved for user {user_id}: type={request.type}, has_image={bool(request.image_url)}")
         
         return {
             "success": True,
@@ -989,18 +1024,18 @@ async def add_to_cart(request: Request, current_user: dict = Depends(verify_toke
             prescription_data = pending_prescriptions.get(str(product_id)) or pending_prescriptions.get(product_id)
             
             if prescription_data:
-                logger.info(f"📋 Found pending prescription for product {product_id}, including in cart item")
+                logger.info(f"[RX] Found pending prescription for product {product_id}, including in cart item")
                 # Include prescription in cart item data (only if not already present)
                 if 'prescription' not in data or not data.get('prescription'):
                     data['prescription'] = prescription_data
-                    logger.info(f"✅ Added pending prescription to cart item")
+                    logger.info(f"[OK] Added pending prescription to cart item")
                 
                 # Clear pending prescription after adding to cart
                 users_collection.update_one(
                     {"_id": current_user['_id']},
                     {"$unset": {f"pending_prescriptions.{product_id}": ""}}
                 )
-                logger.info(f"✅ Cleared pending prescription for product {product_id}")
+                logger.info(f"[OK] Cleared pending prescription for product {product_id}")
     
     return cart_service.add_to_cart(str(current_user['_id']), data)
 
@@ -1171,20 +1206,20 @@ async def merge_guest_cart(request: MergeGuestCartRequest, current_user: dict = 
         raise HTTPException(status_code=503, detail="Cart service unavailable")
     
     try:
-        logger.info(f"🔄 Merging guest cart {request.guest_id} into user {current_user['_id']}")
+        logger.info(f"[MERGE] Merging guest cart {request.guest_id} into user {current_user['_id']}")
         
         # Get guest cart items
         guest_cart = cart_service.get_cart_summary(request.guest_id)
         
         if not guest_cart.get('success') or not guest_cart.get('cart'):
-            logger.info(f"✅ No items in guest cart {request.guest_id} to merge")
+            logger.info(f"[OK] No items in guest cart {request.guest_id} to merge")
             return {"success": True, "message": "No items to merge", "items_merged": 0}
         
         guest_items = guest_cart['cart']  # Changed from 'items' to 'cart'
         user_id = str(current_user['_id'])
         items_merged = 0
         
-        logger.info(f"📦 Found {len(guest_items)} items in guest cart to merge")
+        logger.info(f"[MERGE] Found {len(guest_items)} items in guest cart to merge")
         
         # Add each guest item to user's cart
         for item in guest_items:
@@ -1206,17 +1241,17 @@ async def merge_guest_cart(request: MergeGuestCartRequest, current_user: dict = 
                 cart_service.add_to_cart(user_id, item_data)
                 items_merged += 1
             except Exception as e:
-                logger.error(f"❌ Failed to merge item: {e}")
+                logger.error(f"[ERR] Failed to merge item: {e}")
                 continue
         
         # Clear guest cart after successful merge
         try:
             cart_service.clear_cart(request.guest_id)
-            logger.info(f"🗑️  Cleared guest cart {request.guest_id}")
+            logger.info(f"[OK] Cleared guest cart {request.guest_id}")
         except Exception as e:
-            logger.warning(f"⚠️  Failed to clear guest cart: {e}")
+            logger.warning(f"[WARN] Failed to clear guest cart: {e}")
         
-        logger.info(f"✅ Successfully merged {items_merged} items from guest cart")
+        logger.info(f"[OK] Successfully merged {items_merged} items from guest cart")
         return {
             "success": True,
             "message": f"Successfully merged {items_merged} items",
@@ -1224,7 +1259,7 @@ async def merge_guest_cart(request: MergeGuestCartRequest, current_user: dict = 
         }
         
     except Exception as e:
-        logger.error(f"❌ Error merging guest cart: {e}")
+        logger.error(f"[ERR] Error merging guest cart: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to merge cart: {str(e)}")
 
@@ -1305,7 +1340,7 @@ async def create_order(request: CreateOrderRequest, current_user: dict = Depends
         return result
         
     except Exception as e:
-        logger.error(f"❌ Error creating order: {str(e)}")
+        logger.error(f"[ERR] Error creating order: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create order: {str(e)}")
 
@@ -1323,7 +1358,7 @@ async def get_user_orders(current_user: dict = Depends(verify_token)):
         return result
         
     except Exception as e:
-        logger.error(f"❌ Error fetching orders: {str(e)}")
+        logger.error(f"[ERR] Error fetching orders: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch orders: {str(e)}")
 
 @app.get("/api/v1/orders/{order_id}")
@@ -1346,7 +1381,7 @@ async def get_order_details(order_id: str, current_user: dict = Depends(verify_t
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error fetching order {order_id}: {str(e)}")
+        logger.error(f"[ERR] Error fetching order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch order: {str(e)}")
 
 @app.get("/api/v1/orders/thank-you/{order_id}")
@@ -1376,7 +1411,7 @@ async def get_thank_you_data(order_id: str, current_user: dict = Depends(verify_
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error fetching thank you data for order {order_id}: {str(e)}")
+        logger.error(f"[ERR] Error fetching thank you data for order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch order data: {str(e)}")
 
 
@@ -1409,30 +1444,30 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
         shipping_cost = 0.0  # Initialize shipping
         if cart_service:
              # Fetch current cart items to save in order
-             logger.info(f"🛒 Fetching cart for user {user_id}")
+             logger.info(f"[CART] Fetching cart for user {user_id}")
              cart_res = cart_service.get_cart_summary(user_id)
-             logger.info(f"🛒 Cart response success: {cart_res.get('success')}")
+             logger.info(f"[CART] Cart response success: {cart_res.get('success')}")
              if cart_res.get('success'):
                  items = cart_res.get('cart', [])  # Fixed: cart_service returns 'cart', not 'items'
                  discount_amount = float(cart_res.get('discount_amount', 0))  # Get discount from cart
                  shipping_cost = float(cart_res.get('shipping_cost', 0))  # Get shipping from cart
                  
-                 logger.info(f"📦 Cart items count: {len(items)}")
-                 logger.info(f"💰 Cart pricing - Discount: £{discount_amount}, Shipping: £{shipping_cost}")
+                 logger.info(f"[CART] Cart items count: {len(items)}")
+                 logger.info(f"[CART] Cart pricing - Discount: £{discount_amount}, Shipping: £{shipping_cost}")
                  
                  # Warn if shipping or discount are zero
                  if shipping_cost == 0:
-                     logger.warning(f"⚠️  Shipping cost is £0 for user {user_id}")
+                     logger.warning(f"[WARN] Shipping cost is £0 for user {user_id}")
                      logger.warning(f"   Cart has shipping_method: {cart_res.get('shipping_method')}")
                      logger.warning(f"   Subtotal: £{cart_res.get('subtotal', 0)} (Free shipping threshold: £75)")
                      if cart_res.get('subtotal', 0) > 75:
-                         logger.info(f"   ✅ Free shipping applied (subtotal > £75)")
+                         logger.info(f"   [OK] Free shipping applied (subtotal > £75)")
                  
                  if discount_amount == 0:
-                     logger.warning(f"⚠️  Discount is £0 for user {user_id}")
+                     logger.warning(f"[WARN] Discount is £0 for user {user_id}")
                      logger.warning(f"   Cart has coupon: {cart_res.get('coupon')}")
                      if not cart_res.get('coupon'):
-                         logger.info(f"   ℹ️  No coupon applied - this is normal if user didn't enter a code")
+                         logger.info(f"   [INFO] No coupon applied - this is normal if user didn't enter a code")
                  
                  # Log each cart item's pricing details
                  for idx, item in enumerate(items):
@@ -1466,11 +1501,11 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
             except:
                 pass
         
-        logger.info(f"📍 Shipping Address: {address_shipping}")
-        logger.info(f"📍 Billing Address: {address_billing}")
+        logger.info(f"[ADDR] Shipping Address: {address_shipping}")
+        logger.info(f"[ADDR] Billing Address: {address_billing}")
                 
         # 2. Create Order in Database (Status: Pending)
-        logger.info(f"🔨 Creating order with {len(items)} items, discount: £{discount_amount}, shipping: £{shipping_cost}")
+        logger.info(f"[ORDER] Creating order with {len(items)} items, discount: £{discount_amount}, shipping: £{shipping_cost}")
         order_res = order_service.create_order(
             user_id=user_id,
             user_email=user_email,
@@ -1509,7 +1544,7 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
         return session_res
         
     except Exception as e:
-        logger.error(f"❌ Error creating payment session: {str(e)}")
+        logger.error(f"[ERR] Error creating payment session: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
 
@@ -1789,14 +1824,14 @@ async def create_product(product: ProductCreate, current_user: dict = Depends(ve
             created_product["_id"] = str(created_product["_id"])
         
         if result.upserted_id:
-            logger.info(f"✅ Created new product: {product.skuid}")
+            logger.info(f"[OK] Created new product: {product.skuid}")
             return {
                 "success": True,
                 "message": "Product created successfully",
                 "data": created_product
             }
         else:
-            logger.info(f"✅ Updated existing product: {product.skuid}")
+            logger.info(f"[OK] Updated existing product: {product.skuid}")
             return {
                 "success": True,
                 "message": "Product updated successfully",
@@ -1804,7 +1839,7 @@ async def create_product(product: ProductCreate, current_user: dict = Depends(ve
             }
             
     except Exception as e:
-        logger.error(f"❌ Error creating product: {str(e)}")
+        logger.error(f"[ERR] Error creating product: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create product: {str(e)}")
 
 @app.get("/api/v1/public/products")
@@ -2249,24 +2284,24 @@ if __name__ == "__main__":
     import uvicorn
     
     logger.info("=" * 80)
-    logger.info("🚀 STARTING FASTAPI SERVER")
+    logger.info("[START] STARTING FASTAPI SERVER")
     logger.info("=" * 80)
     
     # Print all registered routes
-    logger.info("📋 Registered Routes:")
+    logger.info("[ROUTES] Registered Routes:")
     for route in app.routes:
         if hasattr(route, 'methods') and hasattr(route, 'path'):
             logger.info(f"   {route.path} [{','.join(route.methods)}]")
     
     if db_connected:
         user_count = users_collection.count_documents({})
-        logger.info(f"📊 DB: {config.DATABASE_NAME} | Collection: {config.COLLECTION_NAME} | Users: {user_count}")
+        logger.info(f"[DB] {config.DATABASE_NAME} | Collection: {config.COLLECTION_NAME} | Users: {user_count}")
     
-    logger.info("✅ Routes enabled: /simple-register/, /login/, /unified, /auth/")
-    logger.info("✅ Cart Routes enabled: /api/v1/cart/*")
-    logger.info("✅ Delivery Routes enabled: /api/v1/delivery/*")
+    logger.info("[OK] Routes enabled: /simple-register/, /login/, /unified, /auth/")
+    logger.info("[OK] Cart Routes enabled: /api/v1/cart/*")
+    logger.info("[OK] Delivery Routes enabled: /api/v1/delivery/*")
     logger.info("=" * 80)
-    logger.info(f"🌐 Server starting on http://{getattr(config, 'HOST', '0.0.0.0')}:{getattr(config, 'PORT', 5000)}")
+    logger.info(f"[OK] Server starting on http://{getattr(config, 'HOST', '0.0.0.0')}:{getattr(config, 'PORT', 5000)}")
     logger.info("=" * 80)
     
     uvicorn.run(

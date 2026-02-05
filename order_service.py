@@ -2,9 +2,64 @@ import datetime
 from typing import Dict, Any, List, Optional
 from pymongo.database import Database
 from pymongo.collection import Collection
+from bson import ObjectId
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_cart_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize cart item to match desired order document format.
+    Ensures product_id, name, image, price, product.products, lens, flag, cart_id, added_at.
+    """
+    product_data = item.get("product", {}) or {}
+    products = product_data.get("products", {}) or {}
+    lens_data = item.get("lens", {}) or {}
+
+    # Extract base product_id (strip unique suffix like _1738765432000)
+    raw_id = item.get("product_id", products.get("skuid", products.get("id", "")))
+    if isinstance(raw_id, str) and "_" in raw_id:
+        product_id = raw_id.split("_")[0]
+    else:
+        product_id = str(raw_id) if raw_id else ""
+
+    # Frame/list price for top-level price field
+    try:
+        price = products.get("list_price", products.get("price", item.get("price", 0)))
+        if price is None:
+            price = 0.0
+        elif isinstance(price, str):
+            price = float(str(price).replace("£", "").replace(",", "")) if price else 0.0
+        else:
+            price = float(price)
+    except (ValueError, TypeError):
+        price = 0.0
+
+    name = products.get("name", products.get("naming_system", item.get("name", "")))
+    image = products.get("image", item.get("image", ""))
+    quantity = int(item.get("quantity", 1))
+    cart_id = item.get("cart_id")
+    added_at = item.get("added_at")
+    flag = item.get("flag", "instant")
+
+    # Ensure product.products has string _id for JSON compatibility
+    products_copy = dict(products)
+    if "_id" in products_copy and products_copy["_id"]:
+        products_copy["_id"] = str(products_copy["_id"])
+
+    return {
+        "product_id": product_id,
+        "name": str(name) if name else "Unknown",
+        "image": str(image) if image else "",
+        "price": round(price, 2),
+        "quantity": quantity,
+        "product": {"products": products_copy},
+        "lens": lens_data,
+        "flag": flag,
+        "cart_id": cart_id,
+        "added_at": added_at,
+    }
 
 
 class OrderService:
@@ -22,7 +77,7 @@ class OrderService:
         self.collection.create_index("order_id", unique=True)
         self.collection.create_index("user_id")
         
-        logger.info("✅ OrderService initialized")
+        logger.info("[OK] OrderService initialized")
 
     def _generate_order_id(self) -> str:
         """
@@ -70,10 +125,10 @@ class OrderService:
             subtotal = 0
             
             logger.info(f"\n{'='*80}")
-            logger.info(f"🔍 ORDER CALCULATION DEBUG - Order ID will be: {self._generate_order_id()}")
+            logger.info(f"[ORDER] ORDER CALCULATION DEBUG - Order ID will be: {self._generate_order_id()}")
             logger.info(f"{'='*80}")
-            logger.info(f"📦 Processing {len(cart_items)} cart items")
-            logger.info(f"💰 Input pricing - Discount: £{discount_amount}, Shipping: £{shipping_cost}")
+            logger.info(f"[ORDER] Processing {len(cart_items)} cart items")
+            logger.info(f"[ORDER] Input pricing - Discount: £{discount_amount}, Shipping: £{shipping_cost}")
             
             for item in cart_items:
                 product_price = float(item.get("product", {}).get("products", {}).get("list_price", 0))
@@ -88,7 +143,7 @@ class OrderService:
                 addon_price = tint_price if tint_price > 0 else coating_price
                 
                 # DEBUG LOGGING
-                logger.info(f"\n📦 Item: {item.get('product', {}).get('products', {}).get('name', 'Unknown')}")
+                logger.info(f"\n[ORDER] Item: {item.get('product', {}).get('products', {}).get('name', 'Unknown')}")
                 logger.info(f"   Frame Price: £{product_price}")
                 logger.info(f"   Lens Price: £{lens_price}")
                 logger.info(f"   Tint Price: £{tint_price}")
@@ -97,15 +152,15 @@ class OrderService:
                 logger.info(f"   Quantity: {quantity}")
                 
                 if tint_price == 0 and coating_price == 0:
-                    logger.warning(f"   ⚠️ WARNING: Both tint_price and coating_price are 0! Addon will be missing from total.")
-                    logger.warning(f"   ⚠️ Lens data: {lens_data}")
+                    logger.warning(f"   [WARN] Both tint_price and coating_price are 0! Addon will be missing from total.")
+                    logger.warning(f"   [WARN] Lens data: {lens_data}")
                 
                 # Match frontend and cart_service calculation: frame + lens + addon
                 item_total = (product_price + lens_price + addon_price) * quantity
                 logger.info(f"   Item Total: £{item_total}")
                 subtotal += item_total
             
-            logger.info(f"\n💰 ORDER TOTALS:")
+            logger.info(f"\n[ORDER] ORDER TOTALS:")
             logger.info(f"   Subtotal: £{subtotal}")
             logger.info(f"   Discount: £{discount_amount}")
             logger.info(f"   Shipping: £{shipping_cost}")
@@ -115,44 +170,49 @@ class OrderService:
             logger.info(f"   Order Total: £{order_total}")
             logger.info(f"{'='*80}\n")
 
-            
-            # Create order document
+            # Normalize cart items to desired format (product_id, name, image, price, product.products, lens, etc.)
+            normalized_cart = [_normalize_cart_item(item) for item in cart_items]
+
+            # Create order document (matches desired DB format)
             now = datetime.datetime.utcnow()
+            pay_mode = payment_data.get("pay_mode", "Stripe / Online")
+            payment_status = payment_data.get("payment_status", "Pending")
             order_doc = {
                 "order_id": order_id,
                 "user_id": str(user_id),
                 "customer_email": user_email,
                 "created": now,
                 "updated": now,
-                
+                "updated_at": now,
+
                 # Payment info
-                "pay_mode": payment_data.get("pay_mode", "Unknown"),
-                "payment_status": payment_data.get("payment_status", "Pending"),
-                "transaction_id": payment_data.get("transaction_id"),
-                "payment_intent_id": payment_data.get("payment_intent_id"),
-                
-                # Order status
-                "order_status": "Confirmed",
-                "is_partial": payment_data.get("is_partial", False),
-                
-                # Pricing (use both field names for compatibility with cart and orders)
+                "pay_mode": pay_mode,
+                "payment_status": payment_status,
+                "transaction_id": payment_data.get("transaction_id") or None,
+                "payment_intent_id": payment_data.get("payment_intent_id") or None,
+
+                # Order status (Processing when pending payment)
+                "order_status": "Processing" if payment_status == "Pending" else "Confirmed",
+                "is_partial": bool(payment_data.get("is_partial", False)),
+
+                # Pricing
                 "order_total": round(order_total, 2),
-                "total_payable": round(order_total, 2),  # Same as order_total, matches cart field name
+                "total_payable": round(order_total, 2),
                 "subtotal": round(subtotal, 2),
-                "discount": round(discount_amount, 2),  # Use parameter instead of calculated total_discount
-                "discount_amount": round(discount_amount, 2),  # Same as discount, matches cart field name
-                "shipping_cost": round(shipping_cost, 2),  # Add shipping cost to order document
-                "lens_discount": 0,  # Can be calculated if needed
+                "discount": round(discount_amount, 2),
+                "discount_amount": round(discount_amount, 2),
+                "shipping_cost": round(shipping_cost, 2),
+                "lens_discount": 0,
                 "retailer_lens_discount": 0,
-                
-                # Cart items
-                "cart": cart_items,
-                
+
+                # Cart items (normalized format)
+                "cart": normalized_cart,
+
                 # Addresses
-                "shipping_address": shipping_address,
-                "billing_address": billing_address,
-                
-                # Additional metadata
+                "shipping_address": shipping_address or "",
+                "billing_address": billing_address or "",
+
+                # Metadata
                 "metadata": metadata or {}
             }
             
@@ -160,23 +220,26 @@ class OrderService:
             result = self.collection.insert_one(order_doc)
             
             if result.inserted_id:
-                logger.info(f"✅ Order created: {order_id} for user {user_id}")
+                logger.info(f"[OK] Order created: {order_id} for user {user_id}")
                 
                 # Save total payable to user document for easy retrieval
                 try:
                     users_collection = self.db['users']
-                    from bson import ObjectId
+                    try:
+                        uid = ObjectId(user_id)
+                    except Exception:
+                        uid = user_id
                     users_collection.update_one(
-                        {'_id': ObjectId(user_id)},
+                        {'_id': uid},
                         {'$set': {
                             'last_order_total_payable': round(order_total, 2),
                             'last_order_id': order_id,
                             'last_order_date': now
                         }}
                     )
-                    logger.info(f"✅ Saved total payable £{order_total} to user {user_id}")
+                    logger.info(f"[OK] Saved total payable £{order_total} to user {user_id}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to update user document with total payable: {str(e)}")
+                    logger.warning(f"[WARN] Failed to update user document with total payable: {str(e)}")
                 
                 # Clear user's cart after successful order
                 try:
@@ -184,7 +247,7 @@ class OrderService:
                         {"user_id": str(user_id)},
                         {"$set": {"items": [], "updated_at": now}}
                     )
-                    logger.info(f"✅ Cart cleared for user {user_id}")
+                    logger.info(f"[OK] Cart cleared for user {user_id}")
                 except Exception as e:
                     logger.warning(f"Failed to clear cart: {str(e)}")
                 
@@ -200,7 +263,7 @@ class OrderService:
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Error creating order: {str(e)}")
+            logger.error(f"[ERR] Error creating order: {str(e)}")
             return {
                 "success": False,
                 "error": f"Failed to create order: {str(e)}"
@@ -232,7 +295,7 @@ class OrderService:
             }
             
         except Exception as e:
-            logger.error(f"❌ Error fetching orders: {str(e)}")
+            logger.error(f"[ERR] Error fetching orders: {str(e)}")
             return {
                 "success": False,
                 "error": f"Failed to fetch orders: {str(e)}"
@@ -272,7 +335,7 @@ class OrderService:
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Error fetching order {order_id}: {str(e)}")
+            logger.error(f"[ERR] Error fetching order {order_id}: {str(e)}")
             return {
                 "success": False,
                 "error": f"Failed to fetch order: {str(e)}"
@@ -322,7 +385,7 @@ class OrderService:
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Error updating order status: {str(e)}")
+            logger.error(f"[ERR] Error updating order status: {str(e)}")
             return {
                 "success": False,
                 "error": f"Failed to update order: {str(e)}"
@@ -360,7 +423,7 @@ class OrderService:
             )
             
             if result.modified_count:
-                logger.info(f"✅ Payment status updated for order {order_id}: {payment_status}")
+                logger.info(f"[OK] Payment status updated for order {order_id}: {payment_status}")
                 return {
                     "success": True,
                     "message": "Payment status updated"
@@ -372,7 +435,7 @@ class OrderService:
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Error updating payment status: {str(e)}")
+            logger.error(f"[ERR] Error updating payment status: {str(e)}")
             return {
                 "success": False,
                 "error": f"Failed to update payment status: {str(e)}"
