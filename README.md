@@ -27,3 +27,4 @@ CORS is configured to allow **all origins** (no CORS errors from any frontend or
 - Set env vars on the server (MONGO_URI, SECRET_KEY, STRIPE_*, etc.).
 - Run with: `python app.py` or use gunicorn/uvicorn behind nginx.
 - Point DNS for `newbackend.multifolks.com` to the server and use HTTPS (e.g. Let’s Encrypt).
+"# backendnew" 
