@@ -170,9 +170,9 @@ class StripePaymentService:
                     'message': 'Payment not completed'
                 }
             
-            # Get order_id and user_id from metadata
-            order_id = session.metadata.get('order_id')
-            user_id = session.metadata.get('user_id')
+            # Get order_id and user_id from metadata (Stripe metadata keys are strings)
+            order_id = (session.metadata or {}).get('order_id')
+            user_id = (session.metadata or {}).get('user_id')
             
             if not order_id:
                 return {
@@ -193,29 +193,34 @@ class StripePaymentService:
                 {'$set': payment_update}
             )
             
-            # Create order from cart if cart_service is provided
-            if cart_service and user_id:
+            existing_order = self.orders_collection.find_one({'order_id': order_id})
+            
+            # If order doesn't exist in DB, create it from cart (e.g. create-session was never called or failed)
+            if not existing_order and cart_service and user_id:
                 order_created = self.create_order_from_cart(
                     user_id=user_id,
                     order_id=order_id,
                     session=session,
                     cart_service=cart_service
                 )
-                
                 if not order_created.get('success'):
-                    _safe_print(f"Warning: Order creation failed: {order_created.get('error')}")
-            else:
-                # Fallback: Just update order payment status
-                self.orders_collection.update_one(
-                    {'order_id': order_id},
-                    {'$set': {
-                        'payment_status': 'paid',
-                        'payment_method': 'stripe',
-                        'payment_intent_id': session.payment_intent,
-                        'updated_at': datetime.utcnow()
-                    }},
-                    upsert=True
-                )
+                    _safe_print(f"Warning: Order creation from cart failed: {order_created.get('error')}")
+            
+            # Always update payment status on the order (so existing orders get payment_status = paid)
+            # Include user_id and customer_email so any upserted doc is findable by user
+            update_payload = {
+                'payment_status': 'paid',
+                'payment_method': 'stripe',
+                'payment_intent_id': session.payment_intent,
+                'updated_at': datetime.utcnow(),
+                'user_id': str(user_id) if user_id else None,
+                'customer_email': getattr(session, 'customer_email', None) or (session.metadata or {}).get('customer_email') or '',
+            }
+            self.orders_collection.update_one(
+                {'order_id': order_id},
+                {'$set': update_payload},
+                upsert=True
+            )
             
             return {
                 'success': True,
@@ -276,37 +281,54 @@ class StripePaymentService:
                     'error': 'Cart is empty'
                 }
             
-            # Get user details
-            users_collection = self.db['users']
-            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            # Get user details from accounts collection (same as order_service)
+            accounts_coll_name = getattr(config, 'COLLECTION_NAME', 'accounts_login')
+            users_collection = self.db[accounts_coll_name]
+            try:
+                user = users_collection.find_one({'_id': ObjectId(user_id)})
+            except Exception:
+                user = users_collection.find_one({'_id': user_id})
             
-            # Create order document
+            user_email = (user.get('email', '') if user else '') or getattr(session, 'customer_email', '')
+            now = datetime.utcnow()
+            total_paid = session.amount_total / 100
+            subtotal = cart_result.get('subtotal', 0)
+            discount_amount = cart_result.get('discount_amount', 0)
+            shipping_cost = cart_result.get('shipping_cost', 0)
+            
+            # Create order document (match order_service shape: cart, customer_email, created, updated)
             order = {
                 'order_id': order_id,
-                'user_id': user_id,
-                'user_email': user.get('email', '') if user else '',
-                'user_name': f"{user.get('firstName', '')} {user.get('lastName', '')}".strip() if user else '',
-                'items': items,
-                'subtotal': cart_result.get('subtotal', 0),
-                'shipping_cost': cart_result.get('shipping_cost', 0),
-                'discount': cart_result.get('discount_amount', 0),
-                'total': session.amount_total / 100,
+                'user_id': str(user_id),
+                'customer_email': user_email,
+                'created': now,
+                'updated': now,
+                'updated_at': now,
+                'pay_mode': 'Stripe / Online',
                 'payment_status': 'paid',
-                'payment_method': 'stripe',
+                'transaction_id': None,
                 'payment_intent_id': session.payment_intent,
-                'order_status': 'pending',
-                'shipping_method': cart_result.get('shipping_method', {}),
-                'coupon': cart_result.get('coupon', {}),
-                'created_at': datetime.utcnow(),
-                'updated_at': datetime.utcnow()
+                'order_status': 'Processing',
+                'is_partial': False,
+                'order_total': round(total_paid, 2),
+                'total_payable': round(total_paid, 2),
+                'subtotal': round(subtotal, 2),
+                'discount': round(discount_amount, 2),
+                'discount_amount': round(discount_amount, 2),
+                'shipping_cost': round(shipping_cost, 2),
+                'lens_discount': 0,
+                'retailer_lens_discount': 0,
+                'cart': items,
+                'shipping_address': '',
+                'billing_address': '',
+                'metadata': {}
             }
             
             # Insert order
             self.orders_collection.insert_one(order)
             
-            # Save total payable to user document for easy retrieval
+            # Save total payable to user document (accounts collection)
             try:
-                users_collection = self.db['users']
                 total_payable = session.amount_total / 100  # Convert from pence to GBP
                 users_collection.update_one(
                     {'_id': ObjectId(user_id)},
@@ -320,8 +342,11 @@ class StripePaymentService:
             except Exception as e:
                 _safe_print(f"[WARN] Failed to update user document: {str(e)}")
             
-            # Clear cart
-            cart_service.clear_cart(user_id)
+            # Clear cart after order is saved
+            try:
+                cart_service.clear_cart(user_id)
+            except Exception as e:
+                _safe_print(f"[WARN] Failed to clear cart: {str(e)}")
             
             return {
                 'success': True,

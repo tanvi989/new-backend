@@ -14,7 +14,7 @@ if sys.platform == "win32":
         pass
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Union
 
 # Load .env FIRST (before config) - script dir so it works from any cwd; override=True so project .env wins over system env
 from pathlib import Path
@@ -302,26 +302,19 @@ async def get_all_products(
     return product_service.get_all_products(filters)
 
 # ---------- HELPERS ----------
-UK_MOBILE_PATTERN = re.compile(r"^(\+447\d{9}|07\d{9})$")
-# ... (Rest of file) ...
-
-def is_valid_uk_mobile(number: str) -> bool:
-    if not number:
-        return False
-    number = number.strip().replace(" ", "")
-    return bool(UK_MOBILE_PATTERN.match(number))
+MOBILE_DIGITS_PATTERN = re.compile(r"^\+?[\d\s\-]{10,15}$")
 
 def normalize_mobile(number: str) -> str:
-    if not number:
+    """Normalize for storage. Accepts any global format: digits with optional +, or raw string if no digits."""
+    if not number or not number.strip():
         return ""
-    s = number.strip().replace(" ", "")
-    if s.startswith("+44"):
-        return s
-    if s.startswith("0"):
-        return "+44" + s[1:]
-    if s.startswith("7") and len(s) == 10:
-        return "+44" + s
-    return s
+    s = number.strip().replace(" ", "").replace("-", "")
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return number.strip()
+    if digits.startswith("0"):
+        digits = digits[1:]
+    return "+" + digits if len(digits) >= 10 else digits
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -396,6 +389,19 @@ class LoginRequest(BaseModel):
     username: EmailStr
     password: str
 
+
+class SimpleRegisterRequest(BaseModel):
+    """JSON body for POST /api/v1/auth/simple-register (frontend sends this)."""
+    model_config = {"extra": "ignore"}
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    email: Optional[str] = None
+    mobile: Optional[str] = ""
+    password: Optional[str] = ""
+    country_code: Optional[Union[str, int]] = "44"
+    is_subscribed_whatsapp: Optional[bool] = True
+
+
 class LoginResponse(BaseModel):
     success: bool
     status: int
@@ -430,6 +436,20 @@ class CreatePaymentSessionRequest(BaseModel):
     amount: float
     currency: str = "GBP"
     metadata: Optional[Dict[str, Any]] = None
+    prescriptions: Optional[List[Dict[str, Any]]] = None
+    cart_items: Optional[List[Dict[str, Any]]] = None
+    subtotal: Optional[float] = None
+    discount_amount: Optional[float] = None
+    shipping_cost: Optional[float] = None
+    total_payable: Optional[float] = None
+
+
+class UpdateOrderWithCartRequest(BaseModel):
+    cart_items: Optional[List[Dict[str, Any]]] = None
+    subtotal: Optional[float] = None
+    discount_amount: Optional[float] = None
+    shipping_cost: Optional[float] = None
+    total_payable: Optional[float] = None
 
 class CheckPincodeRequest(BaseModel):
     pincode: str
@@ -484,8 +504,96 @@ async def check_email(email: str):
     exists = users_collection.find_one({"email": email}) is not None
     return {"success": True, "data": {"is_registered": exists}}
 
-# ---------- UNIFIED AUTH WITH MULTI-ROUTE SUPPORT ----------
+
+# ---------- SIMPLE REGISTER (JSON) - Frontend sends application/json ----------
 @app.post("/api/v1/auth/simple-register")
+async def simple_register_json(req: SimpleRegisterRequest):
+    """Accept JSON body from frontend. Mobile: any format (global users, no UK restriction)."""
+    print("[REG] simple-register called (no mobile format validation)")
+    first_name = (req.first_name or "").strip()
+    last_name = (req.last_name or "").strip()
+    email = (req.email or "").strip() or None
+    mobile = (req.mobile or "").strip()
+    password = (req.password or "").strip()
+    country_code = req.country_code if req.country_code is not None else "44"
+    if isinstance(country_code, int):
+        country_code = str(country_code)
+    is_subscribed_whatsapp = req.is_subscribed_whatsapp if req.is_subscribed_whatsapp is not None else True
+
+    if not first_name or not mobile or not password:
+        raise HTTPException(
+            status_code=400,
+            detail={"success": False, "status": 4000, "msg": "Please fill first name, mobile number and password."},
+        )
+
+    # No format restriction: accept mobile numbers from anywhere in the world
+    mobile_digits = re.sub(r"\D", "", mobile)
+    email_to_use = (email or "").strip() or f"dummy_{mobile_digits}@multifolks.us"
+    email_to_use = email_to_use.strip().lower()
+
+    # Case-insensitive exact match (regex is more reliable than $expr across MongoDB versions)
+    email_pattern = "^" + re.escape(email_to_use) + r"$"
+    existing_by_email = users_collection.find_one({"email": {"$regex": email_pattern, "$options": "i"}})
+    if existing_by_email:
+        print(f"[REG] Blocked duplicate email: found existing user _id={existing_by_email.get('_id')} email={existing_by_email.get('email')}")
+        raise HTTPException(status_code=400, detail={"success": False, "status": 4003, "msg": "An account with this email is already registered. Please log in with your password or use Forgot password."})
+
+    international_mobile = normalize_mobile(mobile)
+    primary_contact = int(mobile_digits) if mobile_digits.isdigit() else (mobile_digits or mobile.strip())
+
+    user_doc = {
+        "firstName": first_name,
+        "lastName": last_name,
+        "email": email_to_use,
+        "primaryContact": primary_contact,
+        "international_mobile": international_mobile,
+        "password": hash_password(password),
+        "country_code": int(country_code) if (str(country_code).replace("-", "").isdigit()) else 44,
+        "subscription": True,
+        "subscriptions": {"whatsapp": is_subscribed_whatsapp},
+        "is_guest_user": False,
+        "verify": 0,
+        "dnd": 1,
+        "my_code": "",
+        "additional_features": {"is_email_set": bool(email_to_use and "@" in email_to_use)},
+        "is_staff": False,
+        "is_superuser": False,
+        "is_active": True,
+        "billing_address": "",
+        "shipping_address": "",
+        "updateTime": datetime.now(timezone.utc),
+    }
+
+    result = users_collection.insert_one(user_doc)
+    token = generate_jwt_token(str(result.inserted_id), email_to_use)
+
+    if notification_service:
+        try:
+            user_name = f"{first_name} {last_name}".strip()
+            notification_service.send_welcome_email(email_to_use, user_name, password)
+        except Exception as e:
+            print(f"[ERR] Welcome email: {e}")
+
+    return {
+        "success": True,
+        "status": 2019,
+        "msg": "Registration successful",
+        "data": {
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email_to_use,
+            "mobile": international_mobile,
+            "mobile_international": international_mobile,
+            "is_verified": False,
+            "refer_code": "",
+            "id": str(result.inserted_id),
+            "token": token,
+            "is_new_user": True,
+        },
+    }
+
+
+# ---------- UNIFIED AUTH (FORM; login/unified/auth - simple-register is JSON above) ----------
 @app.post("/api/v1/auth/login")
 @app.post("/api/v1/auth/unified")
 @app.post("/api/v1/auth/auth")
@@ -523,9 +631,9 @@ async def unified_auth(
                 print(f"JSON parse failed (likely not JSON): {json_err}")
                 # Fall back to form data (already parsed)
 
-        # Route-specific logic
-        is_register_route = "/simple-register/" in current_path or "/unified" in current_path or "/auth/" in current_path
-        is_login_route = "/login/" in current_path
+        # Route-specific logic (match path with or without trailing slash)
+        is_register_route = "simple-register" in current_path or "unified" in current_path or "/auth/" in current_path
+        is_login_route = "login" in current_path and "simple-register" not in current_path
 
         # Login path (for /login/ route, or if username provided)
         if username and password and is_login_route:
@@ -543,27 +651,23 @@ async def unified_auth(
             if otp and otp != "0000":  # Example: validate against stored OTP
                 raise HTTPException(status_code=400, detail={"success": False, "status": 4005, "msg": "Invalid OTP"})
 
-            if not is_valid_uk_mobile(mobile):
-                raise HTTPException(status_code=400, detail={"success": False, "status": 4004, "msg": "Invalid UK mobile number. Use +447XXXXXXXXX or 07XXXXXXXXX"})
-
+            # No format restriction: accept mobile numbers from anywhere in the world
             email_to_use = email.strip() if email and email.strip() else None
             mobile_digits = re.sub(r"\D", "", mobile)
 
             if not email_to_use:
                 email_to_use = f"dummy_{mobile_digits}@multifolks.us"
+            email_to_use = email_to_use.strip().lower()
 
-            # Check for duplicates
-            existing = users_collection.find_one({
-                "$or": [
-                    {"email": email_to_use},
-                    {"primaryContact": {"$in": [mobile_digits, int(mobile_digits)] if mobile_digits.isdigit() else [mobile_digits]}}
-                ]
-            })
-            if existing:
-                raise HTTPException(status_code=400, detail={"success": False, "status": 4003, "msg": "Account already exists. Please login."})
+            # Case-insensitive exact match (regex is more reliable than $expr across MongoDB versions)
+            email_pattern = "^" + re.escape(email_to_use) + r"$"
+            existing_by_email = users_collection.find_one({"email": {"$regex": email_pattern, "$options": "i"}})
+            if existing_by_email:
+                print(f"[REG] Blocked duplicate email: found existing user _id={existing_by_email.get('_id')} email={existing_by_email.get('email')}")
+                raise HTTPException(status_code=400, detail={"success": False, "status": 4003, "msg": "An account with this email is already registered. Please log in with your password or use Forgot password."})
 
             international_mobile = normalize_mobile(mobile)
-            primary_contact = int(mobile_digits) if mobile_digits.isdigit() else mobile_digits
+            primary_contact = int(mobile_digits) if mobile_digits.isdigit() else (mobile_digits or mobile.strip())
 
             user_doc = {
                 "firstName": first_name.strip(),
@@ -658,6 +762,9 @@ async def unified_auth(
 # ---------- PROFILE ----------
 @app.get("/api/profile")
 async def get_profile(current_user: dict = Depends(verify_token)):
+    # Guest users have no real profile; require login so registered user data is shown
+    if current_user.get("is_guest") is True:
+        raise HTTPException(status_code=401, detail="Profile requires login. Please sign in or register.")
     return {
         "success": True,
         "data": {
@@ -689,15 +796,13 @@ async def v1_update_profile(request: UpdateProfileRequest, current_user: dict = 
             update_data["firstName"] = request.first_name
         if request.last_name is not None:
             update_data["lastName"] = request.last_name
-        # Handle mobile/contact_number (frontend might send either)
+        # Handle mobile/contact_number (frontend might send either). No format restriction for global users.
         mobile_value = request.mobile or request.contact_number
-        if mobile_value is not None:
-            if not is_valid_uk_mobile(mobile_value):
-                raise HTTPException(status_code=400, detail={"success": False, "status": 4004, "msg": "Invalid UK mobile number"})
-            digits = re.sub(r"\\D", "", mobile_value)
-            update_data["primaryContact"] = int(digits) if digits.isdigit() else digits
+        if mobile_value is not None and str(mobile_value).strip():
+            digits = re.sub(r"\D", "", str(mobile_value))
+            update_data["primaryContact"] = int(digits) if digits.isdigit() else (digits or str(mobile_value).strip())
             cc = request.country_code if request.country_code is not None else current_user.get("country_code", 44)
-            update_data["international_mobile"] = normalize_mobile(mobile_value)  # Use normalize for UK
+            update_data["international_mobile"] = normalize_mobile(str(mobile_value))
             update_data["country_code"] = int(cc)
         elif request.country_code is not None:
             update_data["country_code"] = int(request.country_code)
@@ -765,20 +870,25 @@ async def v1_update_profile(request: UpdateProfileRequest, current_user: dict = 
 # ---------- USER PRESCRIPTIONS ----------
 @app.get("/api/v1/user/prescriptions")
 async def get_user_prescriptions(current_user: dict = Depends(verify_token)):
-    """Get all saved prescriptions for the current user"""
+    """Get all saved prescriptions for the current user or guest."""
     if not db_connected:
         raise HTTPException(status_code=503, detail="Database not connected")
     
     try:
-        user_id = str(current_user['_id'])
+        is_guest = current_user.get("is_guest") is True
+        if is_guest:
+            guest_id = str(current_user["_id"])
+            guest_rx_collection = db["guest_prescriptions"]
+            doc = guest_rx_collection.find_one({"_id": guest_id})
+            prescriptions = (doc.get("prescriptions", []) if doc else [])
+            logger.info(f"[RX] Fetching prescriptions for guest {guest_id}: found {len(prescriptions)}")
+        else:
+            user_id = current_user["_id"]
+            # Always fetch from DB so we have the latest prescriptions (user doc from token may not include full array)
+            user_doc = users_collection.find_one({"_id": user_id}, {"prescriptions": 1})
+            prescriptions = (user_doc.get("prescriptions", []) if user_doc else [])
+            logger.info(f"[RX] Fetching prescriptions for user {user_id}: found {len(prescriptions)}")
         
-        # Get prescriptions from user document
-        prescriptions = current_user.get('prescriptions', [])
-        
-        logger.info(f"[RX] Fetching prescriptions for user {user_id}")
-        logger.info(f"   Found {len(prescriptions)} prescriptions")
-        
-        # Log prescription details for debugging
         for i, pres in enumerate(prescriptions):
             logger.info(f"   Prescription {i+1}: type={pres.get('type')}, has_image={bool(pres.get('image_url'))}, name={pres.get('name')}")
         
@@ -947,42 +1057,65 @@ async def upload_prescription_image(
 
 class SavePrescriptionRequest(BaseModel):
     type: str  # 'upload', 'photo', 'manual'
-    data: Dict[str, Any]
+    data: Union[Dict[str, Any], List[Any]]  # prescription details (OD/OS, reading power, etc.)
     name: str = "My Prescription"
     image_url: Optional[str] = None
     guest_id: Optional[str] = None
 
 @app.post("/api/v1/user/prescriptions")
 async def save_user_prescription(request: SavePrescriptionRequest, current_user: dict = Depends(verify_token)):
-    """Save a new prescription to user's profile"""
+    """Save a new prescription to user's profile (or guest_prescriptions when guest)."""
     if not db_connected:
         raise HTTPException(status_code=503, detail="Database not connected")
     
     try:
-        user_id = current_user['_id']
-        
-        # Create prescription document
+        data_to_store = request.data if isinstance(request.data, dict) else {"items": request.data}
         prescription = {
             "type": request.type,
-            "data": request.data,
+            "data": data_to_store,
             "name": request.name,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        
-        # Add image_url if provided (for upload/photo types)
         if request.image_url:
             prescription["image_url"] = request.image_url
-        
-        # Add prescription to user's prescriptions array
-        users_collection.update_one(
-            {"_id": user_id},
-            {
-                "$push": {"prescriptions": prescription},
-                "$set": {"updateTime": datetime.now(timezone.utc)}
-            }
-        )
-        
-        logger.info(f"[OK] Prescription saved for user {user_id}: type={request.type}, has_image={bool(request.image_url)}")
+
+        # When updating: remove old prescriptions for the same product/cart so only the new one is kept
+        assoc = data_to_store.get("associatedProduct") if isinstance(data_to_store, dict) else {}
+        product_sku = assoc.get("productSku") if assoc else None
+        cart_id = assoc.get("cartId") if assoc else None
+        pull_conditions = []
+        if product_sku is not None and str(product_sku).strip() != "":
+            pull_conditions.append({"data.associatedProduct.productSku": str(product_sku)})
+            pull_conditions.append({"associatedProduct.productSku": str(product_sku)})
+        if cart_id is not None and str(cart_id).strip() != "":
+            pull_conditions.append({"data.associatedProduct.cartId": str(cart_id)})
+            pull_conditions.append({"associatedProduct.cartId": str(cart_id)})
+
+        is_guest = current_user.get("is_guest") is True
+        if is_guest:
+            # Guests: store in guest_prescriptions collection (keyed by guest_id string)
+            guest_id = str(current_user["_id"])
+            guest_rx_collection = db["guest_prescriptions"]
+            update_op = {"$push": {"prescriptions": prescription}, "$set": {"updated_at": datetime.now(timezone.utc)}}
+            if pull_conditions:
+                update_op["$pull"] = {"prescriptions": {"$or": pull_conditions}}
+            guest_rx_collection.update_one(
+                {"_id": guest_id},
+                update_op,
+                upsert=True,
+            )
+            logger.info(f"[OK] Prescription saved for guest {guest_id}: type={request.type}, has_image={bool(request.image_url)} (replaced same product/cart)")
+        else:
+            # Logged-in user: store in user document
+            user_id = current_user["_id"]
+            update_op = {"$push": {"prescriptions": prescription}, "$set": {"updateTime": datetime.now(timezone.utc)}}
+            if pull_conditions:
+                update_op["$pull"] = {"prescriptions": {"$or": pull_conditions}}
+            users_collection.update_one(
+                {"_id": user_id},
+                update_op
+            )
+            logger.info(f"[OK] Prescription saved for user {user_id}: type={request.type}, has_image={bool(request.image_url)} (replaced same product/cart)")
         
         return {
             "success": True,
@@ -1048,10 +1181,14 @@ async def update_quantity(cart_id: int, quantity: int, current_user: dict = Depe
     return cart_service.update_quantity(str(current_user['_id']), cart_id, quantity)
 
 @app.delete("/api/v1/cart/item/{cart_id}")
-async def remove_item(cart_id: int, current_user: dict = Depends(verify_token)):
+async def remove_item(cart_id: str, current_user: dict = Depends(verify_token)):
     if not cart_service:
         raise HTTPException(status_code=503, detail="Cart service unavailable")
-    return cart_service.remove_item(str(current_user['_id']), cart_id)
+    try:
+        cid = int(cart_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid cart_id")
+    return cart_service.remove_item(str(current_user['_id']), cid)
 
 @app.delete("/api/v1/cart/clear")
 async def clear_cart(current_user: dict = Depends(verify_token)):
@@ -1271,6 +1408,7 @@ class CreateOrderRequest(BaseModel):
     shipping_address: str
     billing_address: str
     metadata: Optional[Dict[str, Any]] = None
+    prescriptions: Optional[List[Dict[str, Any]]] = None  # Full prescriptions (photo/manual with image_url) from frontend
 
 @app.post("/api/v1/orders")
 async def create_order(request: CreateOrderRequest, current_user: dict = Depends(verify_token)):
@@ -1280,16 +1418,11 @@ async def create_order(request: CreateOrderRequest, current_user: dict = Depends
     Request body:
     {
         "cart_items": [...],  # Cart items from cart service
-        "payment_data": {
-            "pay_mode": "Stripe / Online",
-            "payment_status": "Success",
-            "transaction_id": "txn_xxx",
-            "payment_intent_id": "pi_xxx",
-            "is_partial": false
-        },
-        "shipping_address": "123 Main St, London, UK",
-        "billing_address": "123 Main St, London, UK",
-        "metadata": {}  # Optional
+        "payment_data": {...},
+        "shipping_address": "...",
+        "billing_address": "...",
+        "metadata": {},  # Optional; may contain prescriptions
+        "prescriptions": []  # Optional; full prescriptions (type, image_url, data) - merged into metadata for DB
     }
     """
     if not order_service:
@@ -1298,6 +1431,12 @@ async def create_order(request: CreateOrderRequest, current_user: dict = Depends
     try:
         user_id = str(current_user['_id'])
         user_email = current_user.get('email', '')
+        
+        # Merge prescriptions from body so camera/upload prescription (image_url) is stored in order
+        metadata = dict(request.metadata) if request.metadata else {}
+        if request.prescriptions is not None:
+            metadata["prescriptions"] = request.prescriptions
+            logger.info(f"[ORDER] Using {len(request.prescriptions)} prescription(s) from request (photo/manual with image_url)")
         
         # Get discount and shipping from cart
         discount_amount = 0.0
@@ -1317,7 +1456,7 @@ async def create_order(request: CreateOrderRequest, current_user: dict = Depends
             billing_address=request.billing_address,
             discount_amount=discount_amount,
             shipping_cost=shipping_cost,
-            metadata=request.metadata
+            metadata=metadata
         )
         
         # Send order confirmation email
@@ -1384,6 +1523,27 @@ async def get_order_details(order_id: str, current_user: dict = Depends(verify_t
         logger.error(f"[ERR] Error fetching order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch order: {str(e)}")
 
+
+@app.patch("/api/v1/orders/{order_id}")
+async def update_order_with_cart(order_id: str, body: UpdateOrderWithCartRequest, current_user: dict = Depends(verify_token)):
+    """
+    Update order with cart and totals (called from payment-success page to fix £0 order).
+    """
+    if not order_service:
+        raise HTTPException(status_code=503, detail="Order service unavailable")
+    result = order_service.update_order_with_cart(
+        order_id=order_id,
+        cart_items=body.cart_items,
+        subtotal=body.subtotal,
+        discount_amount=body.discount_amount,
+        shipping_cost=body.shipping_cost,
+        total_payable=body.total_payable,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=404 if result.get("message") == "Order not found" else 500, detail=result.get("message") or result.get("error"))
+    return result
+
+
 @app.get("/api/v1/orders/thank-you/{order_id}")
 async def get_thank_you_data(order_id: str, current_user: dict = Depends(verify_token)):
     """
@@ -1440,18 +1600,28 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
         # We'll try to get items from cart service if not in metadata
         
         items = []
-        discount_amount = 0.0  # Initialize discount
-        shipping_cost = 0.0  # Initialize shipping
-        if cart_service:
-             # Fetch current cart items to save in order
+        discount_amount = 0.0
+        shipping_cost = 0.0
+        subtotal_from_cart = None
+        total_payable_from_cart = None
+        # Prefer frontend payload so order has correct cart/totals even if backend cart is empty
+        if getattr(request, "cart_items", None) and len(request.cart_items) > 0:
+            items = request.cart_items
+            discount_amount = float(request.discount_amount or 0)
+            shipping_cost = float(request.shipping_cost or 0)
+            if request.subtotal is not None:
+                subtotal_from_cart = float(request.subtotal)
+            if request.total_payable is not None:
+                total_payable_from_cart = float(request.total_payable)
+            logger.info(f"[CART] Using frontend cart_items ({len(items)} items) and totals")
+        elif cart_service:
              logger.info(f"[CART] Fetching cart for user {user_id}")
              cart_res = cart_service.get_cart_summary(user_id)
              logger.info(f"[CART] Cart response success: {cart_res.get('success')}")
              if cart_res.get('success'):
-                 items = cart_res.get('cart', [])  # Fixed: cart_service returns 'cart', not 'items'
-                 discount_amount = float(cart_res.get('discount_amount', 0))  # Get discount from cart
-                 shipping_cost = float(cart_res.get('shipping_cost', 0))  # Get shipping from cart
-                 
+                 items = cart_res.get('cart', [])
+                 discount_amount = float(cart_res.get('discount_amount', 0))
+                 shipping_cost = float(cart_res.get('shipping_cost', 0))
                  logger.info(f"[CART] Cart items count: {len(items)}")
                  logger.info(f"[CART] Cart pricing - Discount: £{discount_amount}, Shipping: £{shipping_cost}")
                  
@@ -1504,7 +1674,11 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
         logger.info(f"[ADDR] Shipping Address: {address_shipping}")
         logger.info(f"[ADDR] Billing Address: {address_billing}")
                 
-        # 2. Create Order in Database (Status: Pending)
+        # Merge prescriptions from frontend into metadata
+        if getattr(request, "prescriptions", None):
+            metadata = {**(metadata or {}), "prescriptions": request.prescriptions}
+
+        # 2. Create Order in Database (Status: Pending) - use frontend order_id so payment-success PATCH finds it
         logger.info(f"[ORDER] Creating order with {len(items)} items, discount: £{discount_amount}, shipping: £{shipping_cost}")
         order_res = order_service.create_order(
             user_id=user_id,
@@ -1512,21 +1686,22 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
             cart_items=items,
             payment_data={
                 "pay_mode": "Stripe / Online",
-                "payment_status": "Pending", 
+                "payment_status": "Pending",
                 "is_partial": False
             },
             shipping_address=address_shipping,
             billing_address=address_billing,
-            discount_amount=discount_amount,  # Pass discount to order
-            shipping_cost=shipping_cost,  # Pass shipping to order
-            metadata=metadata
+            discount_amount=discount_amount,
+            shipping_cost=shipping_cost,
+            metadata=metadata,
+            order_id_override=request.order_id,
+            subtotal_override=subtotal_from_cart,
+            total_payable_override=total_payable_from_cart,
         )
 
-        
         if not order_res.get('success'):
-             raise HTTPException(status_code=500, detail="Failed to create pending order")
-        
-        # Use the Backend Generated Order ID
+            raise HTTPException(status_code=500, detail="Failed to create pending order")
+
         backend_order_id = order_res['order_id']
         
         # 3. Create Stripe Session
@@ -1567,7 +1742,8 @@ async def stripe_webhook(request: Request):
     if event.type == "checkout.session.completed":
         session = event.data.object
         if session.payment_status == "paid":
-            payment_service.confirm_payment(session.id)
+            # Pass cart_service so order can be created from cart if it wasn't created at create-session
+            payment_service.confirm_payment(session.id, cart_service=cart_service)
     elif event.type == "checkout.session.expired":
         session = event.data.object
         payment_service.payments_collection.update_one(
@@ -2194,6 +2370,123 @@ async def login_with_pin(request: LoginWithPinRequest):
         }
     }
 
+# ---------- NEWSLETTER SUBSCRIPTION (public, no auth) ----------
+NEWSLETTER_SUBSCRIPTIONS_COLLECTION_NAME = "newsletter_subscriptions"
+
+class NewsletterSubscribeRequest(BaseModel):
+    email: EmailStr
+
+@app.post("/api/v1/newsletter/subscribe")
+async def newsletter_subscribe(request: NewsletterSubscribeRequest):
+    """
+    Save newsletter subscription to MongoDB collection 'newsletter_subscriptions'
+    and send one email to admin (CONTACT_FORM_TO_EMAIL / SMTP_EMAIL). No auth.
+    """
+    ensure_db()
+    if not db_connected or db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not connected. Set MONGO_URI in newbackend/.env.",
+        )
+    try:
+        collection = db[NEWSLETTER_SUBSCRIPTIONS_COLLECTION_NAME]
+        email_lower = request.email.strip().lower()
+        doc = {
+            "email": email_lower,
+            "created_at": datetime.now(timezone.utc),
+        }
+        result = collection.insert_one(doc)
+        logger.info("[NEWSLETTER] Saved subscription id=%s email=%s", result.inserted_id, email_lower)
+
+        notify_to = (getattr(config, "CONTACT_FORM_TO_EMAIL", None) or "").strip() or (getattr(config, "SMTP_EMAIL", None) or "").strip()
+        if notify_to and notification_service:
+            logger.info("[NEWSLETTER] Sending notification to %s", notify_to)
+            try:
+                res = notification_service.send_newsletter_subscription_notification(to_email=notify_to, subscriber_email=email_lower)
+                if not res.get("success"):
+                    logger.warning("[NEWSLETTER] Email send failed: %s", res.get("msg", "unknown"))
+            except Exception as mail_err:
+                logger.warning("[NEWSLETTER] Email notification failed (subscription still saved): %s", mail_err)
+        else:
+            if not notify_to:
+                logger.warning("[NEWSLETTER] No CONTACT_FORM_TO_EMAIL or SMTP_EMAIL in .env - skipping email")
+
+        return {
+            "success": True,
+            "message": "Thanks for subscribing to our newsletter.",
+            "id": str(result.inserted_id),
+        }
+    except Exception as e:
+        logger.error("[NEWSLETTER] Error: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to subscribe")
+
+# ---------- CONTACT FORM (public, no auth) ----------
+CONTACT_SUBMISSIONS_COLLECTION_NAME = "contact_submissions"
+
+class ContactSubmitRequest(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    phone: str
+    comment: str
+
+@app.post("/api/v1/contact")
+async def submit_contact(request: ContactSubmitRequest):
+    """
+    Save contact form submission to MongoDB collection 'contact_submissions'.
+    No authentication required.
+    """
+    ensure_db()
+    if not db_connected or db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not connected. Set MONGO_URI in newbackend/.env to your MongoDB Atlas URI (not localhost).",
+        )
+    try:
+        collection = db[CONTACT_SUBMISSIONS_COLLECTION_NAME]
+        doc = {
+            "first_name": request.first_name.strip(),
+            "last_name": request.last_name.strip(),
+            "email": request.email.strip().lower(),
+            "phone": request.phone.strip(),
+            "comment": request.comment.strip(),
+            "created_at": datetime.now(timezone.utc),
+        }
+        result = collection.insert_one(doc)
+        logger.info("[CONTACT] Saved submission id=%s email=%s", result.inserted_id, request.email)
+
+        # Send contact form details to your email (if SMTP configured)
+        notify_to = (getattr(config, "CONTACT_FORM_TO_EMAIL", None) or "").strip() or (getattr(config, "SMTP_EMAIL", None) or "").strip()
+        if notify_to and notification_service:
+            logger.info("[CONTACT] Sending email notification to %s", notify_to)
+            try:
+                res = notification_service.send_contact_form_notification(
+                    to_email=notify_to,
+                    first_name=doc["first_name"],
+                    last_name=doc["last_name"],
+                    sender_email=doc["email"],
+                    phone=doc["phone"],
+                    comment=doc["comment"],
+                )
+                if not res.get("success"):
+                    logger.warning("[CONTACT] Email send failed: %s", res.get("msg", "unknown"))
+            except Exception as mail_err:
+                logger.warning("[CONTACT] Email notification failed (submission still saved): %s", mail_err)
+        else:
+            if not notify_to:
+                logger.warning("[CONTACT] No CONTACT_FORM_TO_EMAIL or SMTP_EMAIL in .env - skipping email")
+            elif not notification_service:
+                logger.warning("[CONTACT] notification_service not loaded - skipping email")
+
+        return {
+            "success": True,
+            "message": "Thank you for contacting us. We will get back to you shortly.",
+            "id": str(result.inserted_id),
+        }
+    except Exception as e:
+        logger.error("[CONTACT] Error saving submission: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to submit contact form")
+
 # ---------- HEALTH ----------
 @app.get("/api/health")
 @app.get("/health")
@@ -2298,6 +2591,7 @@ if __name__ == "__main__":
         logger.info(f"[DB] {config.DATABASE_NAME} | Collection: {config.COLLECTION_NAME} | Users: {user_count}")
     
     logger.info("[OK] Routes enabled: /simple-register/, /login/, /unified, /auth/")
+    logger.info("[OK] Registration: mobile accepted in any format (global users, no UK restriction)")
     logger.info("[OK] Cart Routes enabled: /api/v1/cart/*")
     logger.info("[OK] Delivery Routes enabled: /api/v1/delivery/*")
     logger.info("=" * 80)

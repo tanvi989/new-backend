@@ -7,6 +7,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+try:
+    import config as _config
+    USER_COLLECTION_NAME = getattr(_config, "COLLECTION_NAME", "accounts_login")
+except Exception:
+    USER_COLLECTION_NAME = "accounts_login"
+
 
 def _normalize_cart_item(item: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -98,7 +104,10 @@ class OrderService:
         billing_address: str,
         discount_amount: float = 0.0,  # Discount amount from cart (coupon discount)
         shipping_cost: float = 0.0,  # Shipping cost from cart
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        order_id_override: Optional[str] = None,  # Use frontend order_id so PATCH can find the order
+        subtotal_override: Optional[float] = None,
+        total_payable_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Create a new order
@@ -113,13 +122,16 @@ class OrderService:
             discount_amount: Discount amount from cart (coupon discount)
             shipping_cost: Shipping cost from cart
             metadata: Additional metadata
+            order_id_override: If set, use this order_id (from frontend) so payment-success PATCH finds the order
+            subtotal_override: If set, use this subtotal instead of recalculating
+            total_payable_override: If set, use this as order_total/total_payable
             
         Returns:
             Dictionary with order creation status and order_id
         """
         try:
-            # Generate unique order ID
-            order_id = self._generate_order_id()
+            # Use frontend order_id when provided so PATCH /orders/:id can find the order after payment
+            order_id = order_id_override if order_id_override else self._generate_order_id()
             
             # Calculate order totals
             subtotal = 0
@@ -160,18 +172,38 @@ class OrderService:
                 logger.info(f"   Item Total: £{item_total}")
                 subtotal += item_total
             
+            # Use overrides from frontend when provided (so order shows correct totals even if cart fetch was empty)
+            if subtotal_override is not None:
+                subtotal = float(subtotal_override)
+                logger.info(f"[ORDER] Using frontend subtotal override: £{subtotal}")
+            if total_payable_override is not None:
+                order_total = float(total_payable_override)
+                logger.info(f"[ORDER] Using frontend total_payable override: £{order_total}")
+            else:
+                order_total = subtotal - discount_amount + shipping_cost
+            
             logger.info(f"\n[ORDER] ORDER TOTALS:")
             logger.info(f"   Subtotal: £{subtotal}")
             logger.info(f"   Discount: £{discount_amount}")
             logger.info(f"   Shipping: £{shipping_cost}")
-            
-            # Calculate order total: subtotal - discount + shipping (matches cart_service.py)
-            order_total = subtotal - discount_amount + shipping_cost
             logger.info(f"   Order Total: £{order_total}")
             logger.info(f"{'='*80}\n")
 
             # Normalize cart items to desired format (product_id, name, image, price, product.products, lens, etc.)
             normalized_cart = [_normalize_cart_item(item) for item in cart_items]
+
+            # Persist prescriptions exactly as received (photo/manual with type, image_url, data). Do not replace with PD-only.
+            if metadata and "prescriptions" in metadata:
+                pres = metadata["prescriptions"]
+                if isinstance(pres, str):
+                    try:
+                        import json
+                        metadata = {**metadata, "prescriptions": json.loads(pres)}
+                    except Exception:
+                        pass
+                elif not isinstance(pres, list):
+                    metadata = {**metadata, "prescriptions": [pres] if pres is not None else []}
+                # List is stored as-is so camera/upload prescription image_url is saved in DB
 
             # Create order document (matches desired DB format)
             now = datetime.datetime.utcnow()
@@ -222,9 +254,9 @@ class OrderService:
             if result.inserted_id:
                 logger.info(f"[OK] Order created: {order_id} for user {user_id}")
                 
-                # Save total payable to user document for easy retrieval
+                # Save total payable to user document for easy retrieval (use accounts collection)
                 try:
-                    users_collection = self.db['users']
+                    users_collection = self.db[USER_COLLECTION_NAME]
                     try:
                         uid = ObjectId(user_id)
                     except Exception:
@@ -440,3 +472,42 @@ class OrderService:
                 "success": False,
                 "error": f"Failed to update payment status: {str(e)}"
             }
+
+    def update_order_with_cart(
+        self,
+        order_id: str,
+        cart_items: Optional[List[Dict[str, Any]]] = None,
+        subtotal: Optional[float] = None,
+        discount_amount: Optional[float] = None,
+        shipping_cost: Optional[float] = None,
+        total_payable: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Update order with cart and totals (called from payment-success page to fix £0 order)."""
+        try:
+            update = {"updated": datetime.datetime.utcnow(), "updated_at": datetime.datetime.utcnow()}
+            if cart_items is not None:
+                normalized = [_normalize_cart_item(i) for i in cart_items]
+                update["cart"] = normalized
+            if subtotal is not None:
+                update["subtotal"] = round(float(subtotal), 2)
+            if discount_amount is not None:
+                update["discount"] = round(float(discount_amount), 2)
+                update["discount_amount"] = round(float(discount_amount), 2)
+            if shipping_cost is not None:
+                update["shipping_cost"] = round(float(shipping_cost), 2)
+            if total_payable is not None:
+                update["total_payable"] = round(float(total_payable), 2)
+                update["order_total"] = round(float(total_payable), 2)
+            if len(update) <= 2:
+                return {"success": True, "message": "No updates"}
+            result = self.collection.update_one(
+                {"order_id": order_id},
+                {"$set": update}
+            )
+            if result.matched_count:
+                logger.info(f"[OK] Order {order_id} updated with cart/totals")
+                return {"success": True, "message": "Order updated"}
+            return {"success": False, "message": "Order not found"}
+        except Exception as e:
+            logger.error(f"[ERR] update_order_with_cart: {str(e)}")
+            return {"success": False, "error": str(e)}
