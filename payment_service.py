@@ -1,4 +1,5 @@
 import json
+import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -11,8 +12,8 @@ import config
 # Stripe SDK imported only when needed (confirm_payment, refunds) - NOT for create_checkout_session
 # This avoids any stripe module output that causes Windows charmap errors
 
-# Payment debug log file (UTF-8) - always works on Windows, captures full errors
-_PAYMENT_DEBUG_LOG = Path(__file__).resolve().parent / "payment_debug.log"
+# Payment debug log: use temp dir (avoids Windows Errno 22 with __file__ paths)
+_PAYMENT_DEBUG_LOG = Path(tempfile.gettempdir()) / "multifolks_payment_debug.log"
 
 def _payment_log(msg: str):
     """Write to payment_debug.log (UTF-8). Never raises."""

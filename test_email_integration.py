@@ -10,7 +10,7 @@ print("=" * 80)
 # Initialize MSG91 Service
 msg91 = MSG91Service()
 
-test_email = "bharath@softreey.com"
+test_email = "paradkartanvii@gmail.com"
 test_name = "Bharath"
 
 print(f"\n📧 Test Email: {test_email}")

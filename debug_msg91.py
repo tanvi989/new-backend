@@ -28,7 +28,7 @@ print("\n" + "=" * 80)
 print("TESTING WITH DETAILED PAYLOAD")
 print("=" * 80)
 
-test_email = "bharath@softreey.com"
+test_email = "paradkartanvii@gmail.com"
 test_name = "Bharath"
 test_pin = "123456"
 

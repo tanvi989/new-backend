@@ -23,7 +23,7 @@ print("\n" + "=" * 80)
 print("TESTING EACH TEMPLATE")
 print("=" * 80)
 
-test_email = "bharath@softreey.com"
+test_email = "paradkartanvii@gmail.com"
 base_url = "https://control.msg91.com/api/v5/email/send"
 
 for template_id in templates:
@@ -88,7 +88,7 @@ print("=" * 80)
 print("\n💡 To check why emails aren't arriving:")
 print("   1. Log into: https://control.msg91.com/")
 print("   2. Go to: Email → Reports")
-print("   3. Search for: bharath@softreey.com")
+print("   3. Search for: paradkartanvii@gmail.com")
 print("   4. Check delivery status and error messages")
 print("\n   Common issues:")
 print("   - Domain 'email.multifolks.com' not verified")

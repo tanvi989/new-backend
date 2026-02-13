@@ -11,7 +11,7 @@ print("=" * 80)
 # Initialize service
 msg91 = MSG91Service()
 
-test_email = "bharat.n@softreey.com"
+test_email = "paradkartanvii@gmail.com"
 test_name = "Bharath"
 test_pin = "654321"
 

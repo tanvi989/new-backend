@@ -1,6 +1,7 @@
 import requests
 import json
 import smtplib
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -163,9 +164,22 @@ class MSG91Service:
         
         return self.send_email(email, template_id, variables)
 
-    def send_order_confirmation(self, email: str, order_id: str, order_total: str = None, name: str = None):
+    def send_order_confirmation(
+        self,
+        email: str,
+        order_id: str,
+        order_total: str = None,
+        name: str = None,
+        order_items: list = None,
+        shipping_address: str = None,
+        order_date: str = None,
+        subtotal: str = None,
+        discount_amount: str = None,
+        shipping_cost: str = None,
+    ):
         """
-        Send order confirmation email.
+        Send order confirmation email (template order_placed_23) with full order details.
+        order_items: list of dicts with name, quantity, price (unit e.g. "£49.99"), optional lineTotal.
         """
         logger.info(f"[MSG91] Sending order confirmation to {email}")
         logger.info(f"   Order ID: {order_id}, Total: {order_total}")
@@ -174,19 +188,59 @@ class MSG91Service:
             logger.error("[ERR] MSG91_ORDER_TEMPLATE_ID not configured")
             print("[ORDER EMAIL] Order template not set: add MSG91_ORDER_TEMPLATE_ID to .env")
             return {"success": False, "msg": "Order template ID missing"}
-            
+
+        # firstName for template subject/heading (order_placed_23)
+        display_name = (name or "User").strip()
+        first_name = display_name.split()[0] if display_name else "Customer"
+
         variables = {
-            "NAME": name or "User",
-            "name": name or "User",
+            "NAME": display_name,
+            "name": display_name,
+            "firstName": first_name,
             "order_id": order_id,
             "ORDER_ID": order_id,
-            "email": email
+            "email": email,
+            "orderTrackingLink": f"{WEBSITE_URL}/orders",
+            "year": str(datetime.now().year),
         }
-        
         if order_total:
             variables["order_total"] = order_total
             variables["ORDER_TOTAL"] = order_total
-        
+            variables["orderTotal"] = order_total
+        if order_date:
+            variables["orderDate"] = order_date
+        if shipping_address:
+            variables["shippingAddress"] = shipping_address
+        if subtotal:
+            variables["subtotal"] = subtotal
+        if discount_amount is not None:
+            variables["discountAmount"] = discount_amount
+        if shipping_cost is not None:
+            variables["shippingCost"] = shipping_cost
+
+        # orderItems for {{#each orderItems}} (name, quantity, price, optional lineTotal)
+        items_for_template = []
+        if order_items:
+            for it in order_items:
+                qty = int(it.get("quantity", 1))
+                price_str = str(it.get("price", "£0.00"))
+                line_total = it.get("lineTotal")
+                if line_total is None and price_str.startswith("£"):
+                    try:
+                        val = float(price_str.replace("£", "").replace(",", ""))
+                        line_total = f"£{(val * qty):.2f}"
+                    except (ValueError, TypeError):
+                        line_total = price_str
+                item_row = {
+                    "name": str(it.get("name", "Item")),
+                    "quantity": qty,
+                    "price": price_str,
+                }
+                if line_total:
+                    item_row["lineTotal"] = str(line_total)
+                items_for_template.append(item_row)
+        variables["orderItems"] = items_for_template
+
         return self.send_email(email, template_id, variables)
 
     def _email_html_template(self, title: str, body_html: str) -> str:

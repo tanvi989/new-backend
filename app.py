@@ -228,10 +228,18 @@ def ensure_db():
                     "WAREHOUSE_ADDRESS": getattr(config, "WAREHOUSE_ADDRESS", None),
                 }
                 delivery_service = DeliveryService(db, delivery_config)
-            if MSG91Service:
-                notification_service = MSG91Service()
         except Exception as e:
             logger.warning("Some services failed to init: %s", e)
+        # Init notification (order email) in its own try so one failure doesn't block others
+        try:
+            if MSG91Service:
+                notification_service = MSG91Service()
+                print("[ORDER EMAIL] Notification service READY - order confirmation emails will be sent.")
+            else:
+                print("[ORDER EMAIL] Notification service NOT loaded (MSG91Service import failed).")
+        except Exception as e:
+            logger.warning("Notification service failed to init: %s", e)
+            print(f"[ORDER EMAIL] Notification service FAILED to init: {e} - order emails will NOT be sent.")
         return db
     except Exception as e:
         mongo_connection_error = str(e)
@@ -1540,17 +1548,47 @@ async def create_order(request: CreateOrderRequest, current_user: dict = Depends
         if not result.get('success'):
             print("[ORDER EMAIL] Not sent: order creation did not succeed.")
         elif not notification_service:
-            print("[ORDER EMAIL] Not sent: notification_service is not loaded (check MSG91 config).")
+            print("[ORDER EMAIL] Not sent: notification_service is not loaded (check MSG91 config). Check /api/health for order_email_ready.")
+        elif not (user_email or "").strip():
+            print("[ORDER EMAIL] Not sent: no user email (current_user.email empty).")
         else:
             try:
+                print(f"[ORDER EMAIL] Attempting to send to {user_email!r} for order {result.get('order_id', 'N/A')} (POST /orders).")
                 user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip() or "Customer"
                 order_id = result.get('order_id', 'N/A')
-                total = sum(item.get('total_price', 0) for item in request.cart_items)
+                order_items = []
+                total = 0.0
+                for item in request.cart_items:
+                    qty = max(1, int(item.get('quantity', 1)))
+                    line_total = float(item.get('total_price') or item.get('price', 0) or 0)
+                    if line_total == 0 and item.get('price') is not None:
+                        line_total = float(item.get('price', 0)) * qty
+                    total += line_total
+                    unit_price = line_total / qty
+                    prod = (item.get('product') or {}).get('products') if isinstance((item.get('product') or {}).get('products'), dict) else {}
+                    name = (prod.get('name') or prod.get('naming_system') or item.get('name') or 'Item') if prod else (item.get('name') or 'Item')
+                    order_items.append({
+                        "name": str(name or "Item"),
+                        "quantity": qty,
+                        "price": f"£{unit_price:.2f}",
+                        "lineTotal": f"£{line_total:.2f}",
+                    })
                 total_str = f"£{total:.2f}"
+                subtotal_val = total + discount_amount - shipping_cost
+                order_date_str = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M")
                 email_result = notification_service.send_order_confirmation(
-                    user_email, order_id, total_str, user_name
+                    user_email, order_id, total_str, user_name, order_items=order_items,
+                    shipping_address=request.shipping_address or "",
+                    order_date=order_date_str,
+                    subtotal=f"£{subtotal_val:.2f}",
+                    discount_amount=f"£{discount_amount:.2f}",
+                    shipping_cost=f"£{shipping_cost:.2f}",
                 )
                 if email_result.get("success"):
+                    order_service.collection.update_one(
+                        {"order_id": order_id, "user_id": user_id},
+                        {"$set": {"confirmation_email_sent_at": datetime.now(timezone.utc)}}
+                    )
                     print(f"[ORDER EMAIL] SENT to {user_email} for order {order_id} (total {total_str}).")
                 else:
                     print(f"[ORDER EMAIL] NOT SENT to {user_email}: {email_result.get('msg', 'unknown error')}")
@@ -1655,6 +1693,89 @@ async def get_thank_you_data(order_id: str, current_user: dict = Depends(verify_
     except Exception as e:
         logger.error(f"[ERR] Error fetching thank you data for order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch order data: {str(e)}")
+
+
+@app.post("/api/v1/orders/{order_id}/send-confirmation-email")
+async def send_order_confirmation_email(order_id: str, current_user: dict = Depends(verify_token)):
+    """
+    Send order confirmation email after payment completed.
+    Called by frontend when user lands on payment success page (e.g. /payment/success?order_id=...).
+    Idempotent: if email was already sent (webhook or previous call), skips sending.
+    """
+    print(f"[ORDER EMAIL] send-confirmation-email endpoint hit for order {order_id}")
+    if not order_service:
+        raise HTTPException(status_code=503, detail="Order service unavailable")
+    if not notification_service:
+        print("[ORDER EMAIL] Cannot send: notification_service not loaded")
+        raise HTTPException(status_code=503, detail="Email service not available")
+    user_id = str(current_user["_id"])
+    try:
+        # Find order by order_id only (success page has order_id in URL)
+        order_doc = order_service.collection.find_one({"order_id": order_id}, {"_id": 0})
+        if not order_doc:
+            # Order not in DB (e.g. different backend created it). Still send email to logged-in user so they get confirmation.
+            user_email = (current_user.get("email") or "").strip()
+            if not user_email or not notification_service:
+                print(f"[ORDER EMAIL] Order {order_id} not found in database and no user email")
+                raise HTTPException(status_code=404, detail="Order not found")
+            user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip() or "Customer"
+            print(f"[ORDER EMAIL] Order {order_id} not in DB; sending confirmation to logged-in user {user_email}")
+            email_result = notification_service.send_order_confirmation(
+                user_email, order_id, "—", user_name, order_items=[],
+                shipping_address="", order_date=datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M"),
+                subtotal=None, discount_amount="£0.00", shipping_cost="£0.00",
+            )
+            if email_result.get("success"):
+                print(f"[ORDER EMAIL] SENT to {user_email} for order {order_id} (fallback, order not in DB).")
+                return {"success": True, "sent": True, "message": "Confirmation email sent"}
+            return {"success": False, "sent": False, "message": email_result.get("msg", "Failed to send email")}
+        if order_doc.get("confirmation_email_sent_at"):
+            print(f"[ORDER EMAIL] Order {order_id} already had email sent, skipping")
+            return {"success": True, "sent": False, "message": "Confirmation email already sent"}
+        user_email = (order_doc.get("customer_email") or "").strip() or (current_user.get("email") or "").strip()
+        if not user_email:
+            print(f"[ORDER EMAIL] Order {order_id} has no customer_email and user has no email")
+            raise HTTPException(status_code=400, detail="Order has no customer email")
+        total = order_doc.get("total_payable") or order_doc.get("order_total") or 0
+        total_str = f"£{float(total):.2f}"
+        user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip() or "Customer"
+        order_items = []
+        for it in order_doc.get("cart", []):
+            qty = max(1, int(it.get("quantity", 1)))
+            price_val = float(it.get("price", 0))
+            line_total = price_val * qty
+            order_items.append({
+                "name": str(it.get("name", "Item")),
+                "quantity": qty,
+                "price": f"£{price_val:.2f}",
+                "lineTotal": f"£{line_total:.2f}",
+            })
+        created = order_doc.get("created") or order_doc.get("updated_at") or datetime.now(timezone.utc)
+        order_date_str = created.strftime("%d %b %Y, %H:%M") if hasattr(created, "strftime") else datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M")
+        sub = order_doc.get("subtotal")
+        disc = order_doc.get("discount_amount") or order_doc.get("discount", 0)
+        ship = order_doc.get("shipping_cost", 0)
+        email_result = notification_service.send_order_confirmation(
+            user_email, order_id, total_str, user_name, order_items=order_items,
+            shipping_address=order_doc.get("shipping_address") or "",
+            order_date=order_date_str,
+            subtotal=f"£{float(sub):.2f}" if sub is not None else None,
+            discount_amount=f"£{float(disc):.2f}",
+            shipping_cost=f"£{float(ship):.2f}",
+        )
+        if email_result.get("success"):
+            order_service.collection.update_one(
+                {"order_id": order_id},
+                {"$set": {"confirmation_email_sent_at": datetime.now(timezone.utc)}}
+            )
+            print(f"[ORDER EMAIL] SENT to {user_email} for order {order_id} (payment-success page).")
+            return {"success": True, "sent": True, "message": "Confirmation email sent"}
+        return {"success": False, "sent": False, "message": email_result.get("msg", "Failed to send email")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Send confirmation email for order {order_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------- PAYMENT ENDPOINTS ----------
@@ -1785,6 +1906,50 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
             raise HTTPException(status_code=500, detail="Failed to create pending order")
 
         backend_order_id = order_res['order_id']
+
+        # Send order confirmation email when order is created (Stripe flow) so user gets mail even if webhook doesn't run (e.g. localhost)
+        if not notification_service:
+            print("[ORDER EMAIL] Not sent (create-session): notification_service is not loaded. Check /api/health for order_email_ready.")
+        elif not (user_email or "").strip():
+            print("[ORDER EMAIL] Not sent (create-session): no user email.")
+        if notification_service and (user_email or "").strip():
+            try:
+                print(f"[ORDER EMAIL] Attempting to send to {user_email!r} for order {backend_order_id} (create-session).")
+                total_val = total_payable_from_cart if total_payable_from_cart is not None else (subtotal_from_cart or 0) - discount_amount + shipping_cost
+                total_str = f"£{float(total_val):.2f}"
+                user_name = f"{current_user.get('firstName', '')} {current_user.get('lastName', '')}".strip() or "Customer"
+                order_items = []
+                for item in items:
+                    qty = max(1, int(item.get('quantity', 1)))
+                    line_total = float(item.get('total_price') or item.get('price', 0) or 0)
+                    if line_total == 0 and item.get('price'):
+                        line_total = float(item.get('price', 0)) * qty
+                    unit_price = line_total / qty
+                    prod = (item.get('product') or {}).get('products') if isinstance((item.get('product') or {}).get('products'), dict) else {}
+                    name = (prod.get('name') or prod.get('naming_system') or item.get('name') or 'Item') if prod else (item.get('name') or 'Item')
+                    order_items.append({
+                        "name": str(name),
+                        "quantity": qty,
+                        "price": f"£{unit_price:.2f}",
+                        "lineTotal": f"£{line_total:.2f}",
+                    })
+                order_date_str = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M")
+                subtotal_val = (subtotal_from_cart if subtotal_from_cart is not None else total_val + discount_amount - shipping_cost)
+                email_result = notification_service.send_order_confirmation(
+                    user_email, backend_order_id, total_str, user_name, order_items=order_items,
+                    shipping_address=address_shipping or "",
+                    order_date=order_date_str,
+                    subtotal=f"£{float(subtotal_val):.2f}",
+                    discount_amount=f"£{discount_amount:.2f}",
+                    shipping_cost=f"£{shipping_cost:.2f}",
+                )
+                if email_result.get("success"):
+                    print(f"[ORDER EMAIL] SENT to {user_email} for order {backend_order_id} (create-session).")
+                else:
+                    print(f"[ORDER EMAIL] NOT SENT to {user_email}: {email_result.get('msg', 'unknown error')}")
+            except Exception as e:
+                print(f"[ORDER EMAIL] NOT SENT (create-session): exception - {e}")
+                logger.warning(f"Failed to send order confirmation email (create-session): {e}")
         
         # 3. Create Stripe Session (include customer_email in metadata for webhook fallback)
         session_res = payment_service.create_checkout_session(
@@ -1861,8 +2026,38 @@ async def stripe_webhook(request: Request):
                                         user_name = f"{user.get('firstName', '')} {user.get('lastName', '')}".strip() or user.get("firstName") or user.get("name") or "Customer"
                                 except Exception:
                                     pass
-                            email_result = notification_service.send_order_confirmation(user_email, order_id, total_str, user_name)
+                            order_items = []
+                            for it in order_doc.get("cart", []):
+                                qty = max(1, int(it.get("quantity", 1)))
+                                price_val = float(it.get("price", 0))
+                                line_total = price_val * qty
+                                order_items.append({
+                                    "name": str(it.get("name", "Item")),
+                                    "quantity": qty,
+                                    "price": f"£{price_val:.2f}",
+                                    "lineTotal": f"£{line_total:.2f}",
+                                })
+                            created = order_doc.get("created") or order_doc.get("updated_at") or datetime.now(timezone.utc)
+                            if hasattr(created, "strftime"):
+                                order_date_str = created.strftime("%d %b %Y, %H:%M")
+                            else:
+                                order_date_str = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M")
+                            sub = order_doc.get("subtotal")
+                            disc = order_doc.get("discount_amount") or order_doc.get("discount", 0)
+                            ship = order_doc.get("shipping_cost", 0)
+                            email_result = notification_service.send_order_confirmation(
+                                user_email, order_id, total_str, user_name, order_items=order_items,
+                                shipping_address=order_doc.get("shipping_address") or "",
+                                order_date=order_date_str,
+                                subtotal=f"£{float(sub):.2f}" if sub is not None else None,
+                                discount_amount=f"£{float(disc):.2f}",
+                                shipping_cost=f"£{float(ship):.2f}",
+                            )
                             if email_result.get("success"):
+                                payment_service.orders_collection.update_one(
+                                    {"order_id": order_id},
+                                    {"$set": {"confirmation_email_sent_at": datetime.now(timezone.utc)}}
+                                )
                                 print(f"[ORDER EMAIL] SENT to {user_email} for order {order_id} (total {total_str}).")
                                 logger.info(f"Order confirmation email sent to {user_email} for order {order_id}")
                             else:
@@ -2618,16 +2813,20 @@ async def submit_contact(request: ContactSubmitRequest):
 @app.get("/api/health")
 @app.get("/health")
 async def health_check():
+    ensure_db()
     user_count = users_collection.count_documents({}) if db_connected else None
     out = {
         "success": True,
         "message": "API is running",
         "mongodb": "connected" if db_connected else "disconnected",
+        "order_email_ready": notification_service is not None,
         "total_users": user_count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if not db_connected and mongo_connection_error:
         out["mongodb_error"] = mongo_connection_error
+    if not out["order_email_ready"]:
+        out["order_email_note"] = "Order confirmation emails will NOT be sent. Check MSG91 config and backend console."
     return out
 
 
