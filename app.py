@@ -490,6 +490,19 @@ class CreateShipmentRequest(BaseModel):
 class MergeGuestCartRequest(BaseModel):
     guest_id: str
 
+
+class SaveGuestCartStateItem(BaseModel):
+    cart_id: int
+    lens: Optional[Dict[str, Any]] = None
+    prescription: Optional[Dict[str, Any]] = None
+    product_details: Optional[Dict[str, Any]] = None
+
+
+class SaveGuestCartStateRequest(BaseModel):
+    guest_id: str
+    items: List[SaveGuestCartStateItem]
+
+
 # ---------- LOGIN HELPER ----------
 async def login_user_by_email(email: str, password: str):
     if not db_connected:
@@ -1418,6 +1431,41 @@ async def update_cart_prescription(
 class MergeGuestCartRequest(BaseModel):
     guest_id: str
 
+@app.post("/api/v1/cart/save-guest-cart-state")
+async def save_guest_cart_state(request: SaveGuestCartStateRequest, current_user: dict = Depends(verify_token)):
+    """
+    Save PD, prescription and lens/coating from localStorage/sessionStorage into the guest cart in DB.
+    Call this right after login (before merge-guest-cart) so the guest cart has full data before merge.
+    Requires authenticated user; guest_id in body identifies the guest cart to update.
+    """
+    if not cart_service:
+        raise HTTPException(status_code=503, detail="Cart service unavailable")
+    if current_user.get("is_guest") is True:
+        raise HTTPException(status_code=400, detail="Must be logged in to save guest cart state")
+    try:
+        guest_id = str(request.guest_id)
+        updated = 0
+        for entry in request.items:
+            try:
+                r = cart_service.update_cart_item_extras(
+                    guest_id,
+                    entry.cart_id,
+                    lens=entry.lens,
+                    prescription=entry.prescription,
+                    product_details=entry.product_details,
+                )
+                if r.get("success"):
+                    updated += 1
+            except Exception as e:
+                logger.warning(f"[SAVE_GUEST_STATE] Item {entry.cart_id}: {e}")
+                continue
+        logger.info(f"[SAVE_GUEST_STATE] Updated {updated}/{len(request.items)} items for guest {guest_id}")
+        return {"success": True, "message": f"Saved state for {updated} items", "items_updated": updated}
+    except Exception as e:
+        logger.error(f"[ERR] save_guest_cart_state: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/cart/merge-guest-cart")
 async def merge_guest_cart(request: MergeGuestCartRequest, current_user: dict = Depends(verify_token)):
     """
@@ -1443,25 +1491,44 @@ async def merge_guest_cart(request: MergeGuestCartRequest, current_user: dict = 
         
         logger.info(f"[MERGE] Found {len(guest_items)} items in guest cart to merge")
         
-        # Add each guest item to user's cart
+        # Add each guest item to user's cart (include product_details so PD is preserved)
         for item in guest_items:
             try:
-                # Prepare item data for adding to cart
+                products_inner = (item.get('product') or {}).get('products') or {}
+                # Robust product_id and price (guest item may have product_id at top level or under product.products)
+                product_id = (
+                    item.get('product_id')
+                    or products_inner.get('skuid')
+                    or products_inner.get('id')
+                )
+                price_val = (
+                    item.get('price')
+                    or products_inner.get('list_price')
+                    or products_inner.get('price')
+                    or 0
+                )
+                if not product_id:
+                    logger.warning(f"[MERGE] Skipping item with no product_id: {item.get('name', '?')}")
+                    continue
                 item_data = {
-                    'product_id': item.get('product', {}).get('products', {}).get('skuid') or item.get('product', {}).get('products', {}).get('id'),
-                    'name': item.get('product', {}).get('products', {}).get('name'),
-                    'image': item.get('product', {}).get('products', {}).get('image'),
-                    'price': item.get('product', {}).get('products', {}).get('list_price', 0),
+                    'product_id': product_id,
+                    'name': item.get('name') or products_inner.get('name') or '',
+                    'image': item.get('image') or products_inner.get('image') or '',
+                    'price': price_val,
                     'quantity': item.get('quantity', 1),
                     'product': item.get('product'),
-                    'lens': item.get('lens'),
+                    'lens': item.get('lens') or {},
                     'prescription': item.get('prescription'),
                     'flag': item.get('flag', 'normal')
                 }
-                
+                if item.get('product_details'):
+                    item_data['product_details'] = item['product_details']
                 logger.info(f"   Adding item: {item_data.get('name')} (qty: {item_data.get('quantity')})")
-                cart_service.add_to_cart(user_id, item_data)
-                items_merged += 1
+                result = cart_service.add_to_cart(user_id, item_data)
+                if result.get('success'):
+                    items_merged += 1
+                else:
+                    logger.warning(f"[MERGE] add_to_cart returned: {result.get('message', result)}")
             except Exception as e:
                 logger.error(f"[ERR] Failed to merge item: {e}")
                 continue

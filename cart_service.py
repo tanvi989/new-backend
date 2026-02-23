@@ -1,5 +1,5 @@
 import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from pymongo.database import Database
 from pymongo.collection import Collection
 from pymongo.results import UpdateResult
@@ -475,6 +475,36 @@ class CartService:
                 
         except Exception as e:
             return {"success": False, "error": f"Update prescription failed: {str(e)}"}
+
+    # ------------------------------
+    # UPDATE ITEM EXTRAS (lens, prescription, product_details/PD) - for guest cart state save
+    # ------------------------------
+    def update_cart_item_extras(
+        self,
+        user_id: str,
+        cart_id: int,
+        lens: Optional[Dict[str, Any]] = None,
+        prescription: Optional[Dict[str, Any]] = None,
+        product_details: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Update lens, prescription and/or product_details (PD) for one cart item. Used to persist guest data before merge."""
+        try:
+            set_fields = {"items.$.updated_at": datetime.datetime.utcnow(), "updated_at": datetime.datetime.utcnow()}
+            if lens is not None:
+                set_fields["items.$.lens"] = lens
+            if prescription is not None:
+                set_fields["items.$.prescription"] = prescription
+            if product_details is not None:
+                set_fields["items.$.product_details"] = product_details
+            result = self.collection.update_one(
+                {"user_id": str(user_id), "items.cart_id": cart_id},
+                {"$set": set_fields}
+            )
+            if result.matched_count:
+                return {"success": True, "message": "Item extras updated"}
+            return {"success": False, "message": "Item not found"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     # ------------------------------
     # HELPERS
