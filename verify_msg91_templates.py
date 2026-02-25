@@ -7,7 +7,7 @@ print("=" * 80)
 
 auth_key = "482085AD1VnJzkrUX6937ff86P1"
 templates = [
-    "welcome_emailer",
+    "welcome_emailer_new",
     "forgot_password_46592",
     "request_for_otp",
     "order_placed_23"
