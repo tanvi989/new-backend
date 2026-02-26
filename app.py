@@ -99,11 +99,11 @@ logger.info("FastAPI app initialized")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],  # Allow all origins without restrictions
     allow_credentials=True,  # Allow credentials for authentication
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Allow all methods including OPTIONS
-    allow_headers=["*"],  # Allow all headers including Authorization
-    expose_headers=["*"],
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"],  # Expose all headers
 )
 
 logger.info("CORS middleware configured")
