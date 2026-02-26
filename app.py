@@ -99,10 +99,10 @@ logger.info("FastAPI app initialized")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all (localhost, newbackend.multifolks.com, any domain)
-    allow_credentials=False,  # Must be False when using "*" so browsers accept it
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,  # Allow credentials for authentication
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Allow all methods including OPTIONS
+    allow_headers=["*"],  # Allow all headers including Authorization
     expose_headers=["*"],
 )
 
