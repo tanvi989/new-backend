@@ -218,7 +218,7 @@ class MSG91Service:
         if shipping_cost is not None:
             variables["shippingCost"] = shipping_cost
 
-        # orderItems for {{#each orderItems}} (name, quantity, price, optional lineTotal)
+        # cart for {{#each cart}} (name, quantity, price, optional lineTotal)
         items_for_template = []
         if order_items:
             for it in order_items:
@@ -235,11 +235,20 @@ class MSG91Service:
                     "name": str(it.get("name", "Item")),
                     "quantity": qty,
                     "price": price_str,
+                    "product_id": str(it.get("product_id", "")),
+                    "lens": {
+                        "main_category": it.get("lens", {}).get("main_category", "Eyewear"),
+                        "lensCategoryDisplay": it.get("lens", {}).get("lensCategoryDisplay", "Glasses"),
+                        "lensIndex": it.get("lens", {}).get("lensIndex", "Standard"),
+                        "coating": it.get("lens", {}).get("coating", "Standard"),
+                        "tint_type": it.get("lens", {}).get("tint_type", ""),
+                        "tint_color": it.get("lens", {}).get("tint_color", "")
+                    }
                 }
                 if line_total:
                     item_row["lineTotal"] = str(line_total)
                 items_for_template.append(item_row)
-        variables["orderItems"] = items_for_template
+        variables["cart"] = items_for_template
 
         return self.send_email(email, template_id, variables)
 
