@@ -199,6 +199,7 @@ class MSG91Service:
             "firstName": first_name,
             "order_id": order_id,
             "ORDER_ID": order_id,
+            "ORDER_NUMBER": order_id,  # For template compatibility
             "email": email,
             "orderTrackingLink": f"{WEBSITE_URL}/orders",
             "year": str(datetime.now().year),
@@ -209,6 +210,7 @@ class MSG91Service:
             variables["orderTotal"] = order_total
         if order_date:
             variables["orderDate"] = order_date
+            variables["ORDER_DATE"] = order_date  # For template compatibility
         if shipping_address:
             variables["shippingAddress"] = shipping_address
         if subtotal:
@@ -217,6 +219,7 @@ class MSG91Service:
             variables["discountAmount"] = discount_amount
         if shipping_cost is not None:
             variables["shippingCost"] = shipping_cost
+            variables["shipping_cost"] = shipping_cost  # For template compatibility
 
         # cart for {{#each cart}} (name, quantity, price, optional lineTotal)
         items_for_template = []
