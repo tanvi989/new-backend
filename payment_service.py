@@ -72,7 +72,8 @@ class StripePaymentService:
             # Build form body - Stripe uses application/x-www-form-urlencoded
             form_data = {
                 "mode": "payment",
-                "payment_method_types[]": "card",
+               "automatic_payment_methods[enabled]": "true",
+              "locale": "en-GB",
                 "line_items[0][price_data][currency]": currency,
                 "line_items[0][price_data][product_data][name]": f"Order {order_id}",
                 "line_items[0][price_data][unit_amount]": str(amount_pence),
