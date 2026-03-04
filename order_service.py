@@ -14,14 +14,53 @@ except Exception:
     USER_COLLECTION_NAME = "accounts_login"
 
 
+def _safe_float(val: Any) -> float:
+    """Safely convert value to float, stripping currency symbols."""
+    if val is None: return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    try:
+        return float(str(val).replace("£", "").replace(",", "").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+def _safe_int(val: Any, default: int = 1) -> int:
+    """Safely convert value to int."""
+    if val is None: return default
+    if isinstance(val, int): return val
+    try:
+        return int(float(str(val).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return default
+
+def _is_real_lens_index(v: Any) -> bool:
+    """Check if value is a real lens index (1.50, 1.56, 1.61, etc) not a coating/tint id."""
+    if v is None: return False
+    s = str(v).lower().strip()
+    if not s: return False
+    coating_ids = ["solid", "mirror", "anti-reflective", "water-resistant", "oil-resistant"]
+    if s in coating_ids: return False
+    import re
+    return bool(re.match(r"^1\.\d{2}", s) or re.match(r"^1\.50/1\.56$|^1\.59/1\.61$", s))
+
+
 def _normalize_cart_item(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize cart item to match desired order document format.
     Ensures product_id, name, image, price, product.products, lens, flag, cart_id, added_at.
+    Preserves lens_package, lens_index for display (so order-details shows "1.61 High Index" not "oil-resistant").
     """
     product_data = item.get("product", {}) or {}
     products = product_data.get("products", {}) or {}
-    lens_data = item.get("lens", {}) or {}
+    lens_data = dict(item.get("lens", {}) or {})
+
+    # Use lens_package/lens_index for lensIndex when present (real index), else keep lens.id for coating/tint
+    real_index = lens_data.get("lens_package") or lens_data.get("lens_index")
+    if _is_real_lens_index(real_index):
+        lens_data["lensIndex"] = lens_data.get("lens_index") or lens_data.get("lens_package") or lens_data.get("lensIndex")
+        if "lens_package" not in lens_data and real_index:
+            lens_data["lens_package"] = str(real_index)
+        if "lens_index" not in lens_data and lens_data.get("lens_package"):
+            lens_data["lens_index"] = lens_data.get("lens_package")
 
     # Extract base product_id (strip unique suffix like _1738765432000)
     raw_id = item.get("product_id", products.get("skuid", products.get("id", "")))
@@ -32,19 +71,18 @@ def _normalize_cart_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
     # Frame/list price for top-level price field
     try:
-        price = products.get("list_price", products.get("price", item.get("price", 0)))
-        if price is None:
-            price = 0.0
-        elif isinstance(price, str):
-            price = float(str(price).replace("£", "").replace(",", "")) if price else 0.0
+        # Prefer stored frame_price so order-details shows frame-only
+        raw_frame = item.get("frame_price")
+        if raw_frame is not None:
+             price = _safe_float(raw_frame)
         else:
-            price = float(price)
-    except (ValueError, TypeError):
+            price = _safe_float(products.get("list_price") or products.get("price") or item.get("price"))
+    except Exception:
         price = 0.0
 
     name = products.get("name", products.get("naming_system", item.get("name", "")))
     image = products.get("image", item.get("image", ""))
-    quantity = int(item.get("quantity", 1))
+    quantity = _safe_int(item.get("quantity"), 1)
     cart_id = item.get("cart_id")
     added_at = item.get("added_at")
     flag = item.get("flag", "instant")
@@ -65,6 +103,14 @@ def _normalize_cart_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "flag": flag,
         "cart_id": cart_id,
         "added_at": added_at,
+        # Optional price breakdown if provided by create_order
+        "frame_price": item.get("frame_price"),
+        "lens_price": item.get("lens_price"),
+        "addon_price": item.get("addon_price"),
+        # ✅ PRESERVE PRESCRIPTION DATA
+        "prescription": item.get("prescription"),
+        # Also preserve any other important fields
+        "product_details": item.get("product_details"),
     }
 
 
@@ -143,35 +189,28 @@ class OrderService:
             logger.info(f"[ORDER] Input pricing - Discount: £{discount_amount}, Shipping: £{shipping_cost}")
             
             for item in cart_items:
-                product_price = float(item.get("product", {}).get("products", {}).get("list_price", 0))
-                lens_price = float(item.get("lens", {}).get("selling_price", 0))
-                quantity = int(item.get("quantity", 1))
+                # Basic price calculation with safe string parsing
+                products = item.get("product", {}).get("products", {}) or {}
                 
-                # CRITICAL: Include coating/tint price (matches cart_service.py calculation)
-                # Get tint price for sunglasses, coating price for regular glasses
-                lens_data = item.get("lens", {})
-                tint_price = float(lens_data.get("tint_price", 0))
-                coating_price = float(lens_data.get("coating_price", 0))
+                # Always use backend product price for calculation to ensure safety
+                product_price = _safe_float(products.get("list_price") or products.get("price"))
+                
+                lens_data = item.get("lens", {}) or {}
+                lens_price = _safe_float(lens_data.get("selling_price"))
+                
+                tint_price = _safe_float(lens_data.get("tint_price"))
+                coating_price = _safe_float(lens_data.get("coating_price"))
                 addon_price = tint_price if tint_price > 0 else coating_price
                 
-                # DEBUG LOGGING
-                logger.info(f"\n[ORDER] Item: {item.get('product', {}).get('products', {}).get('name', 'Unknown')}")
-                logger.info(f"   Frame Price: £{product_price}")
-                logger.info(f"   Lens Price: £{lens_price}")
-                logger.info(f"   Tint Price: £{tint_price}")
-                logger.info(f"   Coating Price: £{coating_price}")
-                logger.info(f"   Addon Price (used): £{addon_price}")
-                logger.info(f"   Quantity: {quantity}")
-                
-                if tint_price == 0 and coating_price == 0:
-                    logger.warning(f"   [WARN] Both tint_price and coating_price are 0! Addon will be missing from total.")
-                    logger.warning(f"   [WARN] Lens data: {lens_data}")
-                
-                # Match frontend and cart_service calculation: frame + lens + addon
+                quantity = _safe_int(item.get("quantity"), 1)
                 item_total = (product_price + lens_price + addon_price) * quantity
-                logger.info(f"   Item Total: £{item_total}")
                 subtotal += item_total
-            
+                
+                # Store calculated values (simple floats)
+                item["frame_price"] = product_price
+                item["lens_price"] = lens_price
+                item["addon_price"] = addon_price
+
             # Use overrides from frontend when provided (so order shows correct totals even if cart fetch was empty)
             if subtotal_override is not None:
                 subtotal = float(subtotal_override)
@@ -273,15 +312,8 @@ class OrderService:
                 except Exception as e:
                     logger.warning(f"[WARN] Failed to update user document with total payable: {str(e)}")
                 
-                # Clear user's cart after successful order
-                try:
-                    self.cart_collection.update_one(
-                        {"user_id": str(user_id)},
-                        {"$set": {"items": [], "updated_at": now}}
-                    )
-                    logger.info(f"[OK] Cart cleared for user {user_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to clear cart: {str(e)}")
+                # Cart will be cleared on thank you page after order is confirmed
+                # DO NOT clear cart here - keep data until thank you page
                 
                 return {
                     "success": True,
@@ -471,6 +503,101 @@ class OrderService:
             return {
                 "success": False,
                 "error": f"Failed to update payment status: {str(e)}"
+            }
+
+    def create_order_from_cart(
+        self,
+        user_id: str,
+        order_id: str,
+        cart_service
+    ) -> Dict[str, Any]:
+        """
+        Create order from cart data on thank you page
+        
+        Args:
+            user_id: User ID
+            order_id: Order ID
+            cart_service: CartService instance
+            
+        Returns:
+            Dictionary with order creation status
+        """
+        try:
+            # Get cart data
+            print(f"[ORDER_SERVICE] Creating order from cart for user {user_id}")
+            cart_result = cart_service.get_cart_summary(user_id)
+            
+            if not cart_result.get('success'):
+                return {
+                    'success': False,
+                    'error': 'Failed to retrieve cart data'
+                }
+            
+            items = cart_result.get('cart', [])
+            
+            print(f"[ORDER_SERVICE] Cart items count: {len(items)}")
+            
+            if not items:
+                return {
+                    'success': False,
+                    'error': 'Cart is empty'
+                }
+            
+            # Check if prescription data is present in cart items
+            for idx, item in enumerate(items):
+                print(f"[ORDER_SERVICE] Item {idx + 1}:")
+                print(f"   - Name: {item.get('name')}")
+                print(f"   - Has prescription: {'prescription' in item}")
+                if 'prescription' in item:
+                    prescription = item.get('prescription')
+                    print(f"   - Prescription keys: {list(prescription.keys()) if isinstance(prescription, dict) else 'NOT_DICT'}")
+                    print(f"   - Prescription data: {str(prescription)[:200]}...")
+                else:
+                    print(f"   - ❌ NO PRESCRIPTION DATA FOUND")
+            
+            # Get user details
+            accounts_coll_name = getattr(config, 'COLLECTION_NAME', 'accounts_login')
+            users_collection = self.db[accounts_coll_name]
+            try:
+                user = users_collection.find_one({'_id': ObjectId(user_id)})
+            except Exception:
+                user = users_collection.find_one({'_id': user_id})
+            
+            user_email = user.get('email', '') if user else ''
+            
+            # Create order using existing create_order method
+            order_result = self.create_order(
+                user_id=user_id,
+                user_email=user_email,
+                cart_items=items,
+                payment_data={'pay_mode': 'stripe', 'transaction_id': order_id},
+                shipping_address='Default Address',  # You may want to get this from user profile
+                billing_address='Default Address',   # You may want to get this from user profile
+                discount_amount=cart_result.get('discount_amount', 0),
+                shipping_cost=cart_result.get('shipping_cost', 0),
+                metadata={'order_id': order_id, 'customer_email': user_email},
+                order_id_override=order_id
+            )
+            
+            if order_result.get('success'):
+                print(f"[ORDER_SERVICE] Order {order_id} created successfully from cart")
+                return {
+                    'success': True,
+                    'order_id': order_id,
+                    'message': 'Order created from cart successfully'
+                }
+            else:
+                print(f"[ORDER_SERVICE] Failed to create order from cart: {order_result.get('error')}")
+                return {
+                    'success': False,
+                    'error': order_result.get('error', 'Failed to create order')
+                }
+                
+        except Exception as e:
+            print(f"[ORDER_SERVICE] Error creating order from cart: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Create order from cart failed: {str(e)}'
             }
 
     def update_order_with_cart(

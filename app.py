@@ -1145,6 +1145,14 @@ async def save_user_prescription(request: SavePrescriptionRequest, current_user:
         raise HTTPException(status_code=503, detail="Database not connected")
     
     try:
+        logger.info(f"[RX_SAVE] Incoming save_user_prescription: type={request.type}, name={request.name}")
+        try:
+            # request.data can be dict or list; log associatedProduct/cartId if possible
+            data_dbg = request.data if isinstance(request.data, dict) else {}
+            assoc_dbg = (data_dbg or {}).get("associatedProduct") or {}
+            logger.info(f"[RX_SAVE] associatedProduct from request.data: cartId={assoc_dbg.get('cartId')}, productSku={assoc_dbg.get('productSku')}")
+        except Exception as dbg_err:
+            logger.warning(f"[RX_SAVE] Failed to introspect request.data: {dbg_err}")
         data_to_store = request.data if isinstance(request.data, dict) else {"items": request.data}
         data_to_store = _sanitize_for_bson(data_to_store) or {}
         prescription = {
@@ -1194,26 +1202,77 @@ async def save_user_prescription(request: SavePrescriptionRequest, current_user:
             logger.info(f"[OK] Prescription saved for guest {guest_id}: type={request.type}, has_image={bool(request.image_url)} (replaced same product/cart)")
         else:
             user_id = current_user["_id"]
-            # Ensure user document has prescriptions array (some accounts may not)
-            users_collection.update_one(
-                {"_id": user_id, "prescriptions": {"$exists": False}},
-                {"$set": {"prescriptions": [], "updateTime": datetime.now(timezone.utc)}}
-            )
-            update_op = {"$push": {"prescriptions": prescription}, "$set": {"updateTime": datetime.now(timezone.utc)}}
+
+            # Pull old prescriptions for same product/cart first
             if pull_conditions:
-                update_op["$pull"] = {"prescriptions": {"$or": pull_conditions}}
+                try:
+                    users_collection.update_one(
+                        {"_id": user_id, "prescriptions": {"$exists": True}},
+                        {
+                            "$pull": {"prescriptions": {"$or": pull_conditions}},
+                            "$set": {"updated_at": datetime.now(timezone.utc)}
+                        }
+                    )
+                except Exception as pull_err:
+                    logger.warning(f"[RX] Pull old prescriptions failed (continuing with push): {pull_err}")
+
+            # Save to users collection (same place GET reads from)
+            # IMPORTANT: use upsert=True so logged-in users without an existing user document
+            # still get their prescriptions stored. This mirrors guest behavior.
             result = users_collection.update_one(
                 {"_id": user_id},
-                update_op
+                {
+                    "$push": {"prescriptions": prescription},
+                    "$set": {"updateTime": datetime.now(timezone.utc)}
+                },
+                upsert=True,
             )
-            if result.matched_count == 0:
-                logger.warning(f"[RX] User {user_id} not found for prescription save, upserting prescriptions array")
-                users_collection.update_one(
-                    {"_id": user_id},
-                    {"$set": {"prescriptions": [prescription], "updateTime": datetime.now(timezone.utc)}},
-                    upsert=False
-                )
-            logger.info(f"[OK] Prescription saved for user {user_id}: type={request.type}, has_image={bool(request.image_url)} (replaced same product/cart)")
+
+            if not result.acknowledged:
+                raise RuntimeError("Prescription update was not acknowledged by MongoDB")
+            if result.matched_count == 0 and result.upserted_id:
+                logger.info(f"[OK] Created new user document {result.upserted_id} while saving prescription for user {user_id}")
+            
+            logger.info(f"[OK] Prescription saved for logged-in user {user_id}: type={request.type}, has_image={bool(request.image_url)}")
+            # CRITICAL: Also update the cart item directly so cart page can find it
+            cart_id = None
+            if isinstance(data_to_store, dict):
+                assoc = data_to_store.get("associatedProduct") or {}
+                cart_id = assoc.get("cartId")
+            logger.info(f"[RX_SAVE] Derived cart_id from data_to_store.associatedProduct: {cart_id}")
+
+            if cart_id and cart_service:
+                try:
+                    attach_result = cart_service.update_prescription(
+                        str(user_id),
+                        int(cart_id),
+                        prescription
+                    )
+                    logger.info(f"[OK] Prescription also attached to cart item {cart_id}, result={attach_result}")
+                except Exception as e:
+                    logger.warning(f"[WARN] Failed to attach prescription to cart item {cart_id}: {e}")
+
+            # Also store in pending_prescriptions so add-to-cart can pick it up
+            derived_product_id = None
+            if isinstance(data_to_store, dict):
+                assoc = data_to_store.get("associatedProduct") or {}
+                derived_product_id = assoc.get("productSku") or assoc.get("product_id")
+
+            if derived_product_id:
+                try:
+                    pending_update = users_collection.update_one(
+                        {"_id": user_id},
+                        {
+                            "$set": {
+                                f"pending_prescriptions.{derived_product_id}": prescription,
+                                "updateTime": datetime.now(timezone.utc)
+                            }
+                        }
+                    )
+                    if pending_update.matched_count > 0:
+                        logger.info(f"[OK] Also stored in pending_prescriptions for product {derived_product_id}")
+                except Exception as e:
+                    logger.warning(f"[WARN] Failed to store in pending_prescriptions: {e}")
         
         return {
             "success": True,
@@ -1233,15 +1292,56 @@ async def save_user_prescription(request: SavePrescriptionRequest, current_user:
 # ---------- CART ENDPOINTS (INTEGRATED!) ----------
 @app.get("/api/v1/cart")
 async def get_cart(current_user: dict = Depends(verify_token)):
-    print(f"DEBUG: app.py - get_cart called for user {current_user['_id']}")
-    print(f"DEBUG: app.py - get_cart called for user {current_user['_id']}")
     if not cart_service:
-        print("DEBUG: app.py - cart_service is None")
         raise HTTPException(status_code=503, detail="Cart service unavailable")
     
-    print(f"DEBUG: app.py - calling cart_service.get_cart_summary")
     result = cart_service.get_cart_summary(str(current_user['_id']))
-    print(f"DEBUG: app.py - result: {result}")
+    
+    # Enrich cart items with prescriptions from DB (cross-device fix)
+    if result.get('success') and result.get('cart'):
+        try:
+            is_guest = current_user.get("is_guest") is True
+            user_prescriptions = []
+
+            if is_guest:
+                guest_rx_collection = db["guest_prescriptions"]
+                doc = guest_rx_collection.find_one({"_id": str(current_user["_id"])})
+                user_prescriptions = doc.get("prescriptions", []) if doc else []
+            else:
+                user_doc = users_collection.find_one(
+                    {"_id": current_user["_id"]}, {"prescriptions": 1}
+                )
+                user_prescriptions = user_doc.get("prescriptions", []) if user_doc else []
+
+            active_cart_ids = {str(item['cart_id']) for item in result['cart']}
+
+            for item in result['cart']:
+                # Skip if prescription already attached by cart_service
+                if item.get('prescription') and isinstance(item['prescription'], dict) and item['prescription']:
+                    continue
+
+                cart_id_str = str(item.get('cart_id', ''))
+                product_sku = str(item.get('product_id', ''))
+
+                for rx in user_prescriptions:
+                    assoc = (
+                        rx.get('data', {}).get('associatedProduct')
+                        or rx.get('associatedProduct')
+                        or {}
+                    )
+                    rx_cart_id = str(assoc.get('cartId', ''))
+                    rx_sku = str(assoc.get('productSku', ''))
+
+                    cart_id_matches = rx_cart_id and rx_cart_id == cart_id_str and rx_cart_id in active_cart_ids
+                    sku_matches = rx_sku and rx_sku == product_sku
+
+                    if cart_id_matches or sku_matches:
+                        item['prescription'] = rx
+                        logger.info(f"[RX] Enriched cart item {cart_id_str} with prescription from DB")
+                        break
+        except Exception as e:
+            logger.warning(f"[RX] Failed to enrich cart with prescriptions: {e}")
+
     return result
 
 @app.post("/api/v1/cart/add")
@@ -1252,27 +1352,157 @@ async def add_to_cart(request: Request, current_user: dict = Depends(verify_toke
     
     # Check if there's a pending prescription for this product_id
     product_id = data.get('product_id') or data.get('product', {}).get('products', {}).get('skuid') or data.get('product', {}).get('products', {}).get('id')
+    
+    # CRITICAL: Handle both guest and logged-in users
+    prescription_from_pending = None
+    prescription_from_data = data.get('prescription')
+    
     if product_id and db_connected:
-        # Check user document for pending prescription with this product_id
-        user = users_collection.find_one({"_id": current_user['_id']})
-        if user:
-            pending_prescriptions = user.get('pending_prescriptions', {})
-            # Try both string and ObjectId key formats
-            prescription_data = pending_prescriptions.get(str(product_id)) or pending_prescriptions.get(product_id)
+        # Check if user is guest or logged-in
+        is_guest = current_user.get("is_guest") is True
+        
+        if is_guest:
+            # GUEST USER: Check guest_prescriptions collection
+            guest_id = str(current_user["_id"])
+            guest_rx_collection = db["guest_prescriptions"]
             
-            if prescription_data:
-                logger.info(f"[RX] Found pending prescription for product {product_id}, including in cart item")
-                # Include prescription in cart item data (only if not already present)
-                if 'prescription' not in data or not data.get('prescription'):
-                    data['prescription'] = prescription_data
-                    logger.info(f"[OK] Added pending prescription to cart item")
+            try:
+                guest_doc = guest_rx_collection.find_one({"_id": guest_id})
+                if guest_doc:
+                    prescriptions = guest_doc.get("prescriptions", [])
+                    logger.info(f"[RX] Found {len(prescriptions)} prescriptions for guest {guest_id}")
+                    
+                    # Find prescription matching this product_id
+                    for prescription in prescriptions:
+                        # Check if prescription matches this product_id
+                        associated_product = prescription.get('associatedProduct') or prescription.get('data', {}).get('associatedProduct')
+                        if associated_product:
+                            prescription_product_id = associated_product.get('productSku') or associated_product.get('product_id')
+                            if prescription_product_id == str(product_id):
+                                prescription_from_pending = prescription
+                                logger.info(f"[RX] Found guest prescription for product {product_id}")
+                                break
+            except Exception as e:
+                logger.error(f"[RX] Error checking guest prescriptions: {e}")
+        
+        else:
+            # LOGGED-IN USER: Check users_collection AND guest_prescriptions
+            try:                                          # ← ADD THIS
+                user_id = current_user["_id"]
+                user = users_collection.find_one({"_id": user_id})
                 
-                # Clear pending prescription after adding to cart
-                users_collection.update_one(
-                    {"_id": current_user['_id']},
-                    {"$unset": {f"pending_prescriptions.{product_id}": ""}}
-                )
-                logger.info(f"[OK] Cleared pending prescription for product {product_id}")
+                if not user:
+                    logger.warning(f"[RX] User document not found for logged-in user {user_id}")
+                else:
+                    pending_prescriptions = user.get('pending_prescriptions', {})
+                    prescription_from_pending = (
+                        pending_prescriptions.get(str(product_id)) or
+                        pending_prescriptions.get(product_id)
+                    )
+                    if prescription_from_pending:
+                        logger.info(f"[RX] Found pending prescription for logged-in user, product {product_id}")
+                    
+                    if not prescription_from_pending:
+                        # Check user.prescriptions array FIRST
+                        for rx in user.get('prescriptions', []):
+                            assoc = rx.get('data', {}).get('associatedProduct') or rx.get('associatedProduct') or {}
+                            if assoc:
+                                prescription_product_id = assoc.get('productSku') or assoc.get('product_id')
+                                if prescription_product_id == str(product_id):
+                                    prescription_from_pending = rx
+                                    logger.info(f"[RX] Found prescription in user.prescriptions for product {product_id}")
+                                    break
+                        
+                        # If still not found, check guest_prescriptions collection (where logged-in users are now stored)
+                        if not prescription_from_pending:
+                            guest_rx_collection = db["guest_prescriptions"]
+                            guest_doc = guest_rx_collection.find_one({"_id": str(user_id)})
+                            if guest_doc:
+                                guest_prescriptions = guest_doc.get("prescriptions", [])
+                                logger.info(f"[RX] Checking guest_prescriptions for logged-in user {user_id}: {len(guest_prescriptions)} prescriptions")
+                                 
+                                for prescription in guest_prescriptions:
+                                    associated_product = prescription.get('associatedProduct') or prescription.get('data', {}).get('associatedProduct')
+                                    if associated_product:
+                                        prescription_product_id = associated_product.get('productSku') or associated_product.get('product_id')
+                                        if prescription_product_id == str(product_id):
+                                            prescription_from_pending = prescription
+                                            logger.info(f"[RX] Found prescription in guest_prescriptions for product {product_id}")
+                                            break
+                    else:
+                        logger.warning(f"[RX] No prescription found for logged-in user, product {product_id}")
+            except Exception as e:
+                logger.error(f"[RX] Error checking logged-in user prescriptions: {e}")
+      
+            
+            # Also check pending_prescriptions as backup (for manual prescriptions stored there)
+            user = users_collection.find_one({"_id": current_user['_id']})
+            if user and not prescription_from_pending:
+                pending_prescriptions = user.get('pending_prescriptions', {})
+                # Try both string and ObjectId key formats
+                prescription_from_pending = pending_prescriptions.get(str(product_id)) or pending_prescriptions.get(product_id)
+                
+                # CRITICAL: Also check for fallback cart_id format
+                if not prescription_from_pending:
+                    cart_id_from_data = data.get('cart_id')
+                    if cart_id_from_data:
+                        fallback_key = f"cart_{cart_id_from_data}"
+                        prescription_from_pending = pending_prescriptions.get(fallback_key)
+                        if prescription_from_pending:
+                            logger.info(f"[RX] Found prescription using fallback key: {fallback_key}")
+                
+                if prescription_from_pending:
+                    logger.info(f"[RX] Found pending prescription for logged-in user, product {product_id}")
+                    logger.info(f"[RX] Prescription data: {prescription_from_pending}")
+            elif not user:
+                logger.warning(f"[RX] User document not found for logged-in user {user_id}")
+            
+            # If still no prescription found, check userPrescriptions array as last resort
+            if not prescription_from_pending:
+                user_prescriptions_collection = users_collection
+                user_doc = user_prescriptions_collection.find_one({"_id": user_id})
+                if user_doc:
+                    user_prescriptions = user_doc.get('prescriptions', [])
+                    logger.info(f"[RX] Checking user_prescriptions array as last resort: {len(user_prescriptions)}")
+                    
+                    # Find prescription matching this product_id
+                    for prescription in user_prescriptions:
+                        associated_product = prescription.get('associatedProduct') or prescription.get('data', {}).get('associatedProduct')
+                        if associated_product:
+                            prescription_product_id = associated_product.get('productSku') or associated_product.get('product_id')
+                            if prescription_product_id == str(product_id):
+                                prescription_from_pending = prescription
+                                logger.info(f"[RX] Found prescription in user_prescriptions array for product {product_id}")
+                                break
+    
+    # CRITICAL: Use guest logic - prioritize prescription from data, then from pending
+    final_prescription = prescription_from_data if prescription_from_data else prescription_from_pending
+    
+    if final_prescription:
+        logger.info(f"[RX] Using prescription for product {product_id}")
+        data['prescription'] = final_prescription
+        logger.info(f"[OK] Added prescription to cart item (guest logic)")
+        
+        # CRITICAL: Verify prescription was actually added
+        if 'prescription' in data and data['prescription']:
+            logger.info(f"[OK] VERIFICATION - Prescription added to cart item successfully")
+            logger.info(f"[OK] Prescription type: {data['prescription'].get('type', 'UNKNOWN')}")
+            logger.info(f"[OK] Prescription mode: {data['prescription'].get('mode', 'UNKNOWN')}")
+        else:
+            logger.error(f"[ERR] VERIFICATION - Prescription not added to cart item!")
+    else:
+        logger.info(f"[RX] No prescription found for product {product_id}")
+        # Check if prescription is already in the data being sent
+        if 'prescription' in data and data['prescription']:
+            logger.info(f"[RX] Prescription already in cart data: {data['prescription'].get('type', 'UNKNOWN')}")
+        else:
+            logger.info(f"[RX] No prescription in cart data either")
+    
+    logger.info(f"[CART] Final cart item data keys: {list(data.keys())}")
+    if 'prescription' in data:
+        logger.info(f"[CART] ✅ Cart item includes prescription")
+    else:
+        logger.info(f"[CART] ❌ Cart item missing prescription")
     
     return cart_service.add_to_cart(str(current_user['_id']), data)
 
@@ -1293,6 +1523,167 @@ async def remove_item(cart_id: str, current_user: dict = Depends(verify_token)):
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid cart_id")
     return cart_service.remove_item(str(current_user['_id']), cid)
+
+@app.post("/api/v1/orders/{order_id}/mark-paid")
+async def mark_order_as_paid(order_id: str, current_user: dict = Depends(verify_token)):
+    """
+    Mark order as paid (for local testing since Stripe webhooks don't work with localhost)
+    """
+    print(f"[MARK_PAID] POST request received for order {order_id}")
+    
+    if not order_service:
+        print(f"[MARK_PAID] Order service unavailable")
+        raise HTTPException(status_code=503, detail="Order service unavailable")
+    
+    try:
+        user_id = str(current_user['_id'])
+        
+        print(f"[MARK_PAID] Marking order {order_id} as paid for user {user_id}")
+        
+        # Use existing update_payment_status method
+        result = order_service.update_payment_status(
+            order_id=order_id,
+            payment_status="Paid"
+        )
+        
+        print(f"[MARK_PAID] Update result: {result}")
+        
+        if result.get('success'):
+            print(f"[MARK_PAID] Order {order_id} marked as paid successfully")
+            return {"success": True, "message": "Order marked as paid"}
+        else:
+            print(f"[MARK_PAID] Failed to mark order as paid: {result.get('message')}")
+            return {"success": False, "message": result.get('message', 'Failed to mark order as paid')}
+            
+    except Exception as e:
+        print(f"[MARK_PAID] Error marking order as paid: {str(e)}")
+        import traceback
+        print(f"[MARK_PAID] Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to mark order as paid")
+
+
+@app.put("/api/v1/orders/{order_id}/payment-status")
+async def update_order_payment_status(order_id: str, request: Request, current_user: dict = Depends(verify_token)):
+    """
+    Update order payment status (for local testing since Stripe webhooks don't work with localhost)
+    """
+    print(f"[PAYMENT_STATUS] PUT request received for order {order_id}")
+    
+    if not order_service:
+        print(f"[PAYMENT_STATUS] Order service unavailable")
+        raise HTTPException(status_code=503, detail="Order service unavailable")
+    
+    try:
+        data = await request.json()
+        user_id = str(current_user['_id'])
+        
+        print(f"[PAYMENT_STATUS] Updating order {order_id} payment status for user {user_id}")
+        print(f"[PAYMENT_STATUS] New status: {data.get('payment_status')}")
+        print(f"[PAYMENT_STATUS] Request data: {data}")
+        
+        # Update order payment status
+        update_data = {
+            "payment_status": data.get("payment_status", "Paid"),
+            "order_status": data.get("order_status", "Confirmed"),
+            "payment_intent_id": data.get("payment_intent_id"),
+            "transaction_id": data.get("transaction_id"),
+            "updated_at": datetime.now(timezone.utc)
+        }
+        
+        print(f"[PAYMENT_STATUS] Update data: {update_data}")
+        
+        result = order_service.orders_collection.update_one(
+            {"order_id": order_id, "user_id": user_id},
+            {"$set": update_data}
+        )
+        
+        print(f"[PAYMENT_STATUS] Update result - matched: {result.matched_count}, modified: {result.modified_count}")
+        
+        if result.matched_count > 0:
+            print(f"[PAYMENT_STATUS] Order {order_id} updated successfully")
+            return {"success": True, "message": "Order payment status updated"}
+        else:
+            print(f"[PAYMENT_STATUS] Order {order_id} not found")
+            return {"success": False, "message": "Order not found"}
+            
+    except Exception as e:
+        print(f"[PAYMENT_STATUS] Error updating order payment status: {str(e)}")
+        import traceback
+        print(f"[PAYMENT_STATUS] Traceback: {traceback.format_exc()}")
+        logger.error(f"[PAYMENT_STATUS] Error updating order payment status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update order payment status")
+
+
+@app.post("/api/v1/orders/create-from-payment/{order_id}")
+async def create_order_from_payment(order_id: str, current_user: dict = Depends(verify_token)):
+    """
+    Create order from cart data on thank you page (after successful payment)
+    This ensures cart data is preserved until order is finalized
+    """
+    if not order_service or not cart_service:
+        raise HTTPException(status_code=503, detail="Services unavailable")
+    
+    try:
+        user_id = str(current_user['_id'])
+        
+        print(f"\n[THANK_YOU] Creating order from cart for user {user_id}")
+        print(f"[THANK_YOU] Order ID: {order_id}")
+        
+        # Check if order already exists
+        existing_order = order_service.orders_collection.find_one({'order_id': order_id})
+        if existing_order:
+            print(f"[THANK_YOU] Order {order_id} already exists")
+            return {"success": True, "message": "Order already exists", "order_id": order_id}
+        
+        # Create order from cart data
+        order_result = order_service.create_order_from_cart(
+            user_id=user_id,
+            order_id=order_id,
+            cart_service=cart_service
+        )
+        
+        if order_result.get('success'):
+            print(f"[THANK_YOU] Order {order_id} created successfully from cart")
+            return {"success": True, "message": "Order created from cart", "order_id": order_id}
+        else:
+            print(f"[THANK_YOU] Failed to create order from cart: {order_result.get('error')}")
+            return {"success": False, "message": order_result.get('error', 'Failed to create order')}
+            
+    except Exception as e:
+        logger.error(f"[ERR] Error creating order from payment: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create order from payment")
+
+
+@app.post("/api/v1/cart/clear-after-payment")
+async def clear_cart_after_payment(current_user: dict = Depends(verify_token)):
+    """
+    Clear cart and prescription data after successful payment (called from thank you page)
+    """
+    if not cart_service:
+        raise HTTPException(status_code=503, detail="Cart service unavailable")
+    
+    try:
+        user_id = str(current_user['_id'])
+        
+        # Clear cart
+        cart_result = cart_service.clear_cart(user_id)
+        
+        # Clear all pending prescriptions
+        users_collection.update_one(
+            {"_id": current_user['_id']},
+            {"$unset": {"pending_prescriptions": ""}}
+        )
+        logger.info(f"[OK] Cleared all pending prescriptions for user {user_id}")
+        
+        if cart_result.get('success'):
+            return {"success": True, "message": "Cart and prescription data cleared after payment"}
+        else:
+            return {"success": False, "message": "Failed to clear cart"}
+            
+    except Exception as e:
+        logger.error(f"[ERR] Error clearing cart after payment: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear cart")
+
 
 @app.delete("/api/v1/cart/clear")
 async def clear_cart(current_user: dict = Depends(verify_token)):
@@ -1343,7 +1734,7 @@ async def update_cart_prescription(
     request: Request,
     cart_id: int = Form(...),
     mode: str = Form("upload"),
-    prescription_data: Optional[str] = Form(None),
+    prescription_data: str = Form(...),
     current_user: dict = Depends(verify_token)
 ):
     """
@@ -1418,6 +1809,57 @@ async def update_cart_prescription(
                 prescription_dict = json.loads(prescription_data) if isinstance(prescription_data, str) else prescription_data
                 prescription_dict['mode'] = 'manual'
             
+            # CRITICAL: Apply guest logic to manual prescriptions
+            # Store in pending_prescriptions like guests do
+            
+            # Get product_id for pending_prescriptions storage
+            product_id = None
+            
+            # Method 1: Try to get from cart first
+            cart_result = cart_service.get_cart(str(current_user['_id']))
+            if cart_result.get('success') and cart_result.get('cart'):
+                for item in cart_result['cart']:
+                    if item.get('cart_id') == cart_id:
+                        product_id = item.get('product_id')
+                        logger.info(f"[RX] Found product_id {product_id} from cart for cart_id {cart_id}")
+                        break
+            
+            # Method 2: If not found in cart, try to extract from prescription data
+            if not product_id and prescription_dict:
+                # Check if prescription has associatedProduct info
+                associated_product = prescription_dict.get('associatedProduct') or prescription_dict.get('data', {}).get('associatedProduct')
+                if associated_product:
+                    product_id = associated_product.get('cartId') or associated_product.get('product_id')
+                    logger.info(f"[RX] Found product_id {product_id} from prescription associatedProduct")
+            
+            # Method 3: If still not found, store with cart_id as key (fallback)
+            if not product_id:
+                product_id = f"cart_{cart_id}"
+                logger.warning(f"[RX] Using cart_id as product_id fallback: {product_id}")
+            
+            # Store in pending_prescriptions for future cart additions (like guests do)
+            if product_id and prescription_dict:
+                try:
+                    update_result = users_collection.update_one(
+                        {"_id": current_user["_id"]},
+                        {
+                            "$set": {
+                                f"pending_prescriptions.{product_id}": prescription_dict,
+                                "updateTime": datetime.now(timezone.utc)
+                            }
+                        }
+                    )
+                    if update_result.matched_count > 0:
+                        logger.info(f"[OK] Manual prescription stored as pending for logged-in user, product {product_id}")
+                        logger.info(f"[OK] Applied guest logic - prescription in pending_prescriptions")
+                    else:
+                        logger.warning(f"[WARN] User not found, manual prescription not stored in pending_prescriptions")
+                except Exception as e:
+                    logger.error(f"[ERR] Failed to store manual prescription in pending_prescriptions: {e}")
+            else:
+                logger.warning(f"[WARN] Cannot store manual prescription - product_id: {product_id}, prescription_dict: {bool(prescription_dict)}")
+            
+            # Also update the cart directly (existing behavior)
             return cart_service.update_prescription(
                 str(current_user['_id']),
                 cart_id,
@@ -1924,9 +2366,24 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
         logger.info(f"[ADDR] Shipping Address: {address_shipping}")
         logger.info(f"[ADDR] Billing Address: {address_billing}")
                 
-        # Merge prescriptions from frontend into metadata
-        if getattr(request, "prescriptions", None):
-            metadata = {**(metadata or {}), "prescriptions": request.prescriptions}
+        # Merge prescriptions from frontend into metadata; fix lens_package/lens_index from cart_items when missing
+        pres_list = getattr(request, "prescriptions", None) or []
+        if pres_list and items:
+            by_cart_id = {it.get("cart_id"): it for it in items if it.get("cart_id") is not None}
+            fixed = []
+            for p in pres_list:
+                p = dict(p) if isinstance(p, dict) else p
+                cart_id = p.get("cart_id") or p.get("cartId")
+                cart_item = by_cart_id.get(cart_id) if cart_id is not None else None
+                lens = (cart_item or {}).get("lens") or {}
+                lp, li = lens.get("lens_package"), lens.get("lens_index")
+                if lp or li:
+                    p["lens_package"] = lp or p.get("lens_package")
+                    p["lens_index"] = li or lp or p.get("lens_index")
+                fixed.append(p)
+            pres_list = fixed
+        if pres_list:
+            metadata = {**(metadata or {}), "prescriptions": pres_list}
 
         # 2. Create Order in Database (Status: Pending) - use frontend order_id so payment-success PATCH finds it
         logger.info(f"[ORDER] Creating order with {len(items)} items, discount: £{discount_amount}, shipping: £{shipping_cost}")
@@ -1936,7 +2393,7 @@ async def create_payment_session(request: CreatePaymentSessionRequest, current_u
             cart_items=items,
             payment_data={
                 "pay_mode": "Stripe / Online",
-                "payment_status": "Paid",
+                "payment_status": "Pending",  # Changed from "Paid" to "Pending"
                 "is_partial": False
             },
             shipping_address=address_shipping,
@@ -2028,8 +2485,8 @@ async def stripe_webhook(request: Request):
     if event.type == "checkout.session.completed":
         session = event.data.object
         if session.payment_status == "paid":
-            # Pass cart_service so order can be created from cart if it wasn't created at create-session
-            confirm_result = payment_service.confirm_payment(session.id, cart_service=cart_service)
+            # DO NOT access cart during webhook - preserve cart data until thank you page
+            confirm_result = payment_service.confirm_payment(session.id, cart_service=None)
             # Send order confirmation email after successful payment
             if not confirm_result.get("success"):
                 print("[ORDER EMAIL] Not sent: payment confirm failed.")

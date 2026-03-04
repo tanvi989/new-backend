@@ -199,15 +199,14 @@ class StripePaymentService:
             existing_order = self.orders_collection.find_one({'order_id': order_id})
             
             # If order doesn't exist in DB, create it from cart (e.g. create-session was never called or failed)
+            # DO NOT access cart during webhook - preserve cart data until thank you page
+            # Order will be created on thank you page with complete cart data
             if not existing_order and cart_service and user_id:
-                order_created = self.create_order_from_cart(
-                    user_id=user_id,
-                    order_id=order_id,
-                    session=session,
-                    cart_service=cart_service
-                )
-                if not order_created.get('success'):
-                    _safe_print(f"Warning: Order creation from cart failed: {order_created.get('error')}")
+                print(f"[WEBHOOK] Order {order_id} not found, but cart_service is None - skipping cart access")
+                print(f"[WEBHOOK] Order will be created on thank you page with cart data")
+            elif not existing_order and not cart_service:
+                print(f"[WEBHOOK] Order {order_id} not found and cart_service is None - skipping cart access")
+                print(f"[WEBHOOK] Order will be created on thank you page with cart data")
             
             # Always update payment status on the order (so existing orders get payment_status = paid)
             # Only set customer_email when we have a value (do not overwrite with empty and lose user email)
@@ -269,7 +268,31 @@ class StripePaymentService:
         """
         try:
             # Get cart data
+            print(f"\n[WEBHOOK] Creating order from cart for user {user_id}")
+            print(f"[WEBHOOK] Order ID: {order_id}")
+            print(f"[WEBHOOK] Session ID: {session.id}")
+            
             cart_result = cart_service.get_cart_summary(user_id)
+            
+            print(f"[WEBHOOK] Cart result success: {cart_result.get('success')}")
+            if cart_result.get('success'):
+                items = cart_result.get('cart', [])
+                print(f"[WEBHOOK] Cart items count: {len(items)}")
+                
+                for idx, item in enumerate(items):
+                    print(f"[WEBHOOK] Item {idx + 1}:")
+                    print(f"   - Name: {item.get('name')}")
+                    print(f"   - Has lens: {'lens' in item}")
+                    if 'lens' in item:
+                        lens = item.get('lens', {})
+                        print(f"   - Lens keys: {list(lens.keys())}")
+                        print(f"   - Has tint_price: {'tint_price' in lens}")
+                        print(f"   - Has tint_type: {'tint_type' in lens}")
+                        print(f"   - Has tint_color: {'tint_color' in lens}")
+                        print(f"   - Tint Price: £{lens.get('tint_price', 0)}")
+                        print(f"   - Tint Type: {lens.get('tint_type', 'NONE')}")
+                        print(f"   - Tint Color: {lens.get('tint_color', 'NONE')}")
+                    print(f"   - Has prescription: {'prescription' in item}")
             
             if not cart_result.get('success'):
                 return {
@@ -348,10 +371,8 @@ class StripePaymentService:
                 _safe_print(f"[WARN] Failed to update user document: {str(e)}")
             
             # Clear cart after order is saved
-            try:
-                cart_service.clear_cart(user_id)
-            except Exception as e:
-                _safe_print(f"[WARN] Failed to clear cart: {str(e)}")
+            # Cart will be cleared on thank you page after order is confirmed
+            # DO NOT clear cart here - keep data until thank you page
             
             return {
                 'success': True,

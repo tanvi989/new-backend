@@ -43,6 +43,10 @@ class CartService:
                 print(f"      - Has 'product': {'product' in item}")
                 print(f"      - Has 'lens': {'lens' in item}")
                 print(f"      - Has 'prescription': {'prescription' in item}")
+                if 'prescription' in item:
+                    prescription = item.get('prescription')
+                    print(f"      - Prescription keys: {list(prescription.keys()) if isinstance(prescription, dict) else 'NOT_DICT'}")
+                    print(f"      - Prescription data: {str(prescription)[:200]}...")
                 if 'product' in item:
                     print(f"      - product keys: {list(item.get('product', {}).keys())}")
                     if 'products' in item.get('product', {}):
@@ -127,6 +131,17 @@ class CartService:
             if existing_match:
                 new_quantity = existing_match.get("quantity", 1) + item_data["quantity"]
                 cart_id_to_update = existing_match.get("cart_id")
+                
+                # CRITICAL: Preserve prescription data during quantity update for duplicate items
+                existing_prescription = existing_match.get("prescription")
+                new_prescription = item_data.get("prescription")
+                
+                # Use the new prescription if provided, otherwise preserve existing
+                final_prescription = new_prescription if new_prescription else existing_prescription
+                
+                print(f"[ADD_CART] Duplicate item found - preserving prescription: {bool(final_prescription)}")
+                if final_prescription:
+                    print(f"[ADD_CART] Prescription type: {final_prescription.get('type', 'UNKNOWN')}")
 
                 self.collection.update_one(
                     {"user_id": user_id, "items.cart_id": cart_id_to_update},
@@ -135,6 +150,9 @@ class CartService:
                             "items.$.quantity": new_quantity,
                             "items.$.updated_at": now,
                             "updated_at": now
+                        },
+                        "$setOnInsert": {
+                            "items.$.prescription": final_prescription  # Ensure prescription is preserved
                         }
                     }
                 )
@@ -204,24 +222,49 @@ class CartService:
             return {"success": False, "message": "Quantity must be at least 1"}
 
         try:
-            result: UpdateResult = self.collection.update_one(
+            print(f"\n[UPDATE_QUANTITY] User: {user_id}, Cart ID: {cart_id}, Quantity: {quantity}")
+            
+            # CRITICAL: Preserve prescription data during quantity update
+            # Get current item to preserve prescription
+            current_item = self.collection.find_one(
+                {"user_id": str(user_id), "items.cart_id": cart_id},
+                {"items.$": 1}
+            )
+            
+            if not current_item or not current_item.get("items"):
+                return {"success": False, "message": "Item not found"}
+            
+            item = current_item["items"][0]
+            prescription_data = item.get("prescription")  # Preserve prescription
+            
+            print(f"[UPDATE_QUANTITY] Preserving prescription data: {'prescription' in item}")
+            if prescription_data:
+                print(f"[UPDATE_QUANTITY] Prescription type: {prescription_data.get('type', 'UNKNOWN')}")
+            
+            result = self.collection.update_one(
                 {"user_id": str(user_id), "items.cart_id": cart_id},
                 {
                     "$set": {
                         "items.$.quantity": quantity,
                         "items.$.updated_at": datetime.datetime.utcnow(),
                         "updated_at": datetime.datetime.utcnow()
+                    },
+                    "$setOnInsert": {
+                        "items.$.prescription": prescription_data  # Ensure prescription is preserved
                     }
                 }
             )
-
+            
             if result.modified_count:
-                return {"success": True, "message": "Quantity updated"}
+                print(f"[OK] Quantity updated successfully")
+                return {"success": True, "message": "Quantity updated successfully"}
             else:
-                return {"success": False, "message": "Item not found in cart"}
-
+                print(f"[ERR] Failed to update quantity")
+                return {"success": False, "message": "Failed to update quantity"}
+                
         except Exception as e:
-            return {"success": False, "error": f"Update failed: {str(e)}"}
+            print(f"[ERR] UPDATE_QUANTITY ERROR: {str(e)}")
+            return {"success": False, "error": f"Update quantity failed: {str(e)}"}
 
     # ------------------------------
     # REMOVE ITEM
@@ -360,29 +403,12 @@ class CartService:
                 
             item = cart["items"][0]
             
-            # --- MAPPING FRONTEND DATA TO BACKEND SCHEMA ---
-            # Frontend sends 'lensPackagePrice' -> Backend needs 'selling_price'
-            if "selling_price" not in lens_data and "lensPackagePrice" in lens_data:
-                lens_data["selling_price"] = lens_data["lensPackagePrice"]
-                print(f"[OK] Mapped lensPackagePrice -> selling_price: {lens_data['selling_price']}")
-            
-            # Frontend sends 'priceValue' (for coating) -> Backend needs 'coating_price'
-            if "coating_price" not in lens_data and "priceValue" in lens_data:
-                lens_data["coating_price"] = lens_data["priceValue"]
-                print(f"[OK] Mapped priceValue -> coating_price: {lens_data['coating_price']}")
-            
-            # Frontend sends 'tintPrice' (for sunglasses) -> Backend needs 'tint_price'
-            if "tint_price" not in lens_data and "tintPrice" in lens_data:
-                lens_data["tint_price"] = lens_data["tintPrice"]
-                print(f"[OK] Mapped tintPrice -> tint_price: {lens_data['tint_price']}")
-            
-            # Ensure tint_price defaults to 0 if not present
-            if "tint_price" not in lens_data:
-                lens_data["tint_price"] = 0
-            
-            # Ensure coating_price defaults to 0 if not present  
-            if "coating_price" not in lens_data:
-                lens_data["coating_price"] = 0
+            # --- STORE EXACT FRONTEND LENS DATA ---
+            # Store the lens data EXACTLY as received from frontend
+            # No mapping, no transformation, just preserve all fields
+            print(f"[UPDATE_LENS] Storing exact lens data from frontend:")
+            print(f"[UPDATE_LENS] Received lens_data keys: {list(lens_data.keys())}")
+            print(f"[UPDATE_LENS] Received lens_data: {lens_data}")
             # -----------------------------------------------
             
             print(f"\n[PRICE] PRICE CALCULATION:")
@@ -390,6 +416,9 @@ class CartService:
             print(f"   - selling_price: {lens_data.get('selling_price', 0)}")
             print(f"   - coating_price: {lens_data.get('coating_price', 0)}")
             print(f"   - tint_price: {lens_data.get('tint_price', 0)}")
+            print(f"   - coating: {lens_data.get('coating', 'NONE')}")
+            print(f"   - title: {lens_data.get('title', 'NONE')}")
+            print(f"   - All lens data keys: {list(lens_data.keys())}")
 
             # Calculate new total price
             # Ensure we handle string/int/float correctly
@@ -429,6 +458,20 @@ class CartService:
             print(f"   New Total Price: £{new_total_price}")
             print(f"{'='*80}\n")
             
+            # CRITICAL: Preserve prescription data during lens update
+            # Get current item to preserve prescription
+            current_item = self.collection.find_one(
+                {"user_id": str(user_id), "items.cart_id": cart_id},
+                {"items.$": 1}
+            )
+            
+            prescription_data = None
+            if current_item and current_item.get("items"):
+                prescription_data = current_item["items"][0].get("prescription")
+                print(f"[UPDATE_LENS] Preserving prescription data: {'prescription' in current_item['items'][0]}")
+                if prescription_data:
+                    print(f"[UPDATE_LENS] Prescription type: {prescription_data.get('type', 'UNKNOWN')}")
+            
             result = self.collection.update_one(
                 {"user_id": str(user_id), "items.cart_id": cart_id},
                 {
@@ -437,12 +480,31 @@ class CartService:
                         "items.$.price": new_total_price,
                         "items.$.updated_at": datetime.datetime.utcnow(),
                         "updated_at": datetime.datetime.utcnow()
+                    },
+                    "$setOnInsert": {
+                        "items.$.prescription": prescription_data  # Ensure prescription is preserved
                     }
                 }
             )
             
             if result.modified_count:
                 print(f"[OK] Lens updated successfully for cart_id {cart_id}")
+                
+                # Verify prescription was preserved
+                if prescription_data:
+                    updated_item = self.collection.find_one(
+                        {"user_id": str(user_id), "items.cart_id": cart_id},
+                        {"items.$": 1}
+                    )
+                    
+                    if updated_item and updated_item.get("items"):
+                        saved_prescription = updated_item["items"][0].get("prescription")
+                        if saved_prescription:
+                            print(f"[OK] VERIFICATION - Prescription preserved after lens update")
+                            print(f"[OK] Prescription type: {saved_prescription.get('type', 'UNKNOWN')}")
+                        else:
+                            print(f"[ERR] VERIFICATION - Prescription lost after lens update!")
+                
                 return {"success": True, "message": "Lens updated successfully"}
             else:
                 print(f"[ERR] Failed to update lens for cart_id {cart_id}")
@@ -457,6 +519,33 @@ class CartService:
     # ------------------------------
     def update_prescription(self, user_id: str, cart_id: int, prescription_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            print(f"\n[PRESCRIPTION] Updating prescription for user {user_id}, cart_id {cart_id}")
+            print(f"[PRESCRIPTION] Prescription data keys: {list(prescription_data.keys()) if prescription_data else 'EMPTY'}")
+            print(f"[PRESCRIPTION] Prescription data: {prescription_data}")
+            
+            # CRITICAL: Check if prescription data is being removed
+            current_item = self.collection.find_one(
+                {"user_id": str(user_id), "items.cart_id": cart_id},
+                {"items.$": 1}
+            )
+            
+            if current_item and current_item.get("items"):
+                existing_prescription = current_item["items"][0].get("prescription")
+                print(f"[PRESCRIPTION] Current prescription exists: {bool(existing_prescription)}")
+                if existing_prescription:
+                    print(f"[PRESCRIPTION] Existing prescription type: {existing_prescription.get('type', 'UNKNOWN')}")
+                    print(f"[PRESCRIPTION] New prescription type: {prescription_data.get('type', 'UNKNOWN')}")
+                    
+                    # Check if prescription is being removed
+                    if not prescription_data or (isinstance(prescription_data, dict) and len(prescription_data) == 0):
+                        print(f"[PRESCRIPTION] ⚠️  PRESCRIPTION IS BEING REMOVED!")
+                        print(f"[PRESCRIPTION] This might be intentional (user removing prescription)")
+                    elif existing_prescription and not prescription_data:
+                        print(f"[PRESCRIPTION] ⚠️  PRESCRIPTION IS BEING CLEARED!")
+                        print(f"[PRESCRIPTION] This might be a bug!")
+                else:
+                    print(f"[PRESCRIPTION] No existing prescription - adding new one")
+            
             result = self.collection.update_one(
                 {"user_id": str(user_id), "items.cart_id": cart_id},
                 {
@@ -468,12 +557,48 @@ class CartService:
                 }
             )
             
+            print(f"[PRESCRIPTION] Update result - matched: {result.matched_count}, modified: {result.modified_count}")
+            
             if result.modified_count:
+                print(f"[PRESCRIPTION] ✅ Prescription updated successfully")
+                
+                # Verify the prescription was actually saved
+                updated_item = self.collection.find_one(
+                    {"user_id": str(user_id), "items.cart_id": cart_id},
+                    {"items.$": 1}
+                )
+                
+                if updated_item and updated_item.get("items"):
+                    saved_prescription = updated_item["items"][0].get("prescription")
+                    print(f"[PRESCRIPTION] ✅ VERIFICATION - Prescription saved successfully")
+                    print(f"[PRESCRIPTION] Saved prescription type: {saved_prescription.get('type', 'UNKNOWN')}")
+                    
+                    if saved_prescription and saved_prescription.get('mode') == 'manual':
+                        data = saved_prescription.get('data', {})
+                        print(f"[PRESCRIPTION] ✅ VERIFICATION - Manual prescription data:")
+                        print(f"         Right Eye SPH: {data.get('right_eye', {}).get('sph', 'NOT_SET')}")
+                        print(f"         Left Eye SPH: {data.get('left_eye', {}).get('sph', 'NOT_SET')}")
+                        print(f"         Reading R: {data.get('reading', {}).get('right', 'NOT_SET')}")
+                        print(f"         Reading L: {data.get('reading', {}).get('left', 'NOT_SET')}")
+                        print(f"         PD R: {data.get('pd', {}).get('right', 'NOT_SET')}")
+                        print(f"         PD L: {data.get('pd', {}).get('left', 'NOT_SET')}")
+                        print(f"         Birth Year: {data.get('birth_year', 'NOT_SET')}")
+                    elif saved_prescription and saved_prescription.get('mode') == 'upload':
+                        print(f"[PRESCRIPTION] ✅ VERIFICATION - Uploaded prescription:")
+                        print(f"         File: {saved_prescription.get('fileName', 'NOT_SET')}")
+                        print(f"         GCS URL: {saved_prescription.get('gcs_url', 'NOT_SET')}")
+                    else:
+                        print(f"[PRESCRIPTION] ❓ VERIFICATION - Unknown prescription type")
+                else:
+                    print(f"[PRESCRIPTION] ❌ VERIFICATION - Prescription not found after save!")
+                
                 return {"success": True, "message": "Prescription updated successfully"}
             else:
+                print(f"[PRESCRIPTION] ❌ Item not found or no changes made")
                 return {"success": False, "message": "Item not found or no changes made"}
                 
         except Exception as e:
+            print(f"[PRESCRIPTION] ❌ Update prescription failed: {str(e)}")
             return {"success": False, "error": f"Update prescription failed: {str(e)}"}
 
     # ------------------------------
