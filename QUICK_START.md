@@ -24,15 +24,15 @@ cd C:\Users\ADMIN\Desktop\backend_multifolks-master; .\venv\Scripts\Activate.ps1
    ```
 
 4. **Verify it's running:**
-   - Open browser: http://localhost:5000/api/health
-   - Or PowerShell: `Invoke-WebRequest -Uri http://localhost:5000/api/health`
+   - Open browser: https://livebackend.multifolks.com/api/health
+   - Or PowerShell: `Invoke-WebRequest -Uri https://livebackend.multifolks.com/api/health`
 
 ## Server URLs
 
 - **API Base:** http://localhost:5000
-- **Health Check:** http://localhost:5000/api/health
-- **API Docs:** http://localhost:5000/docs
-- **ReDoc:** http://localhost:5000/redoc
+- **Health Check:** https://livebackend.multifolks.com/api/health
+- **API Docs:** https://livebackend.multifolks.com/docs
+- **ReDoc:** https://livebackend.multifolks.com/redoc
 
 ## Troubleshooting
 

@@ -90,12 +90,12 @@ Open your browser or use curl/PowerShell to check:
 
 **PowerShell:**
 ```powershell
-Invoke-WebRequest -Uri http://localhost:5000/api/health -UseBasicParsing
+Invoke-WebRequest -Uri https://livebackend.multifolks.com/api/health -UseBasicParsing
 ```
 
 **Browser:**
 ```
-http://localhost:5000/api/health
+https://livebackend.multifolks.com/api/health
 ```
 
 **Expected Response:**
@@ -175,9 +175,9 @@ pip install -r requirements.txt
 
 Once the server is running, you can access:
 
-- **Health Check:** `GET http://localhost:5000/api/health`
-- **API Documentation:** `http://localhost:5000/docs` (Swagger UI)
-- **Alternative Docs:** `http://localhost:5000/redoc` (ReDoc)
+- **Health Check:** `GET https://livebackend.multifolks.com/api/health`
+- **API Documentation:** `https://livebackend.multifolks.com/docs` (Swagger UI)
+- **Alternative Docs:** `https://livebackend.multifolks.com/redoc` (ReDoc)
 
 ## 🛑 Stopping the Server
 

@@ -4,7 +4,7 @@
 
 With the backend running (e.g. `python app.py` on port 5000), open:
 
-**http://localhost:5000/api/health**
+**https://livebackend.multifolks.com/api/health**
 
 In the JSON response check:
 

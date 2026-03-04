@@ -69,7 +69,7 @@ def test_cart_addition():
     
     print(f"\n🔍 Step 1: Add item to cart with prescription...")
     try:
-        cart_url = "http://localhost:5000/api/v1/cart/add"
+        cart_url = "https://livebackend.multifolks.com/api/v1/cart/add"
         response = requests.post(cart_url, json=test_item_data, headers=headers)
         
         print(f"   📊 Response status: {response.status_code}")
@@ -87,7 +87,7 @@ def test_cart_addition():
     
     print(f"\n🔍 Step 2: Check cart after addition...")
     try:
-        cart_url = "http://localhost:5000/api/v1/cart"
+        cart_url = "https://livebackend.multifolks.com/api/v1/cart"
         response = requests.get(cart_url, headers=headers)
         
         if response.status_code == 200:

@@ -22,7 +22,7 @@ def test_payment_success_flow():
     
     # Step 1: Call the new endpoint to create order from payment
     print(f"\n=== Step 1: Create Order from Payment ===")
-    create_order_url = f"http://localhost:5000/api/v1/orders/create-from-payment/{order_id}"
+    create_order_url = f"https://livebackend.multifolks.com/api/v1/orders/create-from-payment/{order_id}"
     
     headers = {
         "Content-Type": "application/json",
@@ -41,7 +41,7 @@ def test_payment_success_flow():
             
             # Step 2: Send confirmation email (optional)
             print(f"\n=== Step 2: Send Confirmation Email ===")
-            email_url = f"http://localhost:5000/api/v1/orders/{order_id}/send-confirmation-email"
+            email_url = f"https://livebackend.multifolks.com/api/v1/orders/{order_id}/send-confirmation-email"
             
             try:
                 email_response = requests.post(email_url, headers=headers)

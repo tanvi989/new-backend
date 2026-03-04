@@ -107,7 +107,7 @@ const response = await fetch('/api/v1/cart/add', {
 
 1. **Upload prescription on product page:**
    ```bash
-   curl -X POST http://localhost:5000/api/v1/prescriptions/upload-image \
+   curl -X POST https://livebackend.multifolks.com/api/v1/prescriptions/upload-image \
      -H "Authorization: Bearer YOUR_TOKEN" \
      -F "file=@prescription.pdf" \
      -F "product_id=E21A8529"
@@ -115,7 +115,7 @@ const response = await fetch('/api/v1/cart/add', {
 
 2. **Add product to cart:**
    ```bash
-   curl -X POST http://localhost:5000/api/v1/cart/add \
+   curl -X POST https://livebackend.multifolks.com/api/v1/cart/add \
      -H "Authorization: Bearer YOUR_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{
@@ -126,7 +126,7 @@ const response = await fetch('/api/v1/cart/add', {
 
 3. **Check cart:**
    ```bash
-   curl http://localhost:5000/api/v1/cart \
+   curl https://livebackend.multifolks.com/api/v1/cart \
      -H "Authorization: Bearer YOUR_TOKEN"
    ```
 

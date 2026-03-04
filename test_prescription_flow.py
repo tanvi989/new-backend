@@ -17,7 +17,7 @@ def test_prescription_flow():
     
     print("\n🔍 Step 1: Check current cart state...")
     try:
-        cart_url = "http://localhost:5000/api/v1/cart"
+        cart_url = "https://livebackend.multifolks.com/api/v1/cart"
         response = requests.get(cart_url, headers=headers)
         
         if response.status_code == 200:

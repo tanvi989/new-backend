@@ -12,7 +12,7 @@ def test_cart_persistence():
     print("=== Testing Cart Data Persistence ===")
     
     # Test 1: Get current cart
-    cart_url = "http://localhost:5000/api/v1/cart"
+    cart_url = "https://livebackend.multifolks.com/api/v1/cart"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}"

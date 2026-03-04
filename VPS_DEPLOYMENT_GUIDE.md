@@ -331,7 +331,7 @@ sudo chown www-data:www-data /var/log/multifolks-backend
 
 3. **Test API endpoint:**
    ```bash
-   curl http://localhost:5000/api/health
+   curl https://livebackend.multifolks.com/api/health
    # Or from your browser: http://your-vps-ip/api/health
    ```
 
@@ -502,7 +502,7 @@ pm2 startup
 | Restart service | `sudo systemctl restart multifolks-backend` |
 | View logs | `sudo journalctl -u multifolks-backend -f` |
 | Check status | `sudo systemctl status multifolks-backend` |
-| Test API | `curl http://localhost:5000/api/health` |
+| Test API | `curl https://livebackend.multifolks.com/api/health` |
 | Reload Nginx | `sudo systemctl reload nginx` |
 
 ## 🎉 Deployment Complete!

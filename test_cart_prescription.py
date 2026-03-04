@@ -11,7 +11,7 @@ def test_cart_prescription():
     print("=== Testing Cart Prescription Data ===")
     
     # Get cart
-    cart_url = "http://localhost:5000/api/v1/cart"
+    cart_url = "https://livebackend.multifolks.com/api/v1/cart"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}"

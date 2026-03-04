@@ -202,8 +202,8 @@ python app.py
 If you get "python not found", use the same command that worked for the venv: `python3 app.py` or `py app.py`.
 
 - API: **http://0.0.0.0:5000** (or http://localhost:5000)
-- Docs: **http://localhost:5000/docs**
-- Health: **http://localhost:5000/api/health**
+- Docs: **https://livebackend.multifolks.com/docs**
+- Health: **https://livebackend.multifolks.com/api/health**
 
 Stop with `Ctrl+C`.
 

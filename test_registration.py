@@ -7,7 +7,7 @@ print("TESTING REGISTRATION WITH ENHANCED LOGGING")
 print("=" * 80)
 
 # Test registration
-url = "http://localhost:5000/api/v1/auth/simple-register"
+url = "https://livebackend.multifolks.com/api/v1/auth/simple-register"
 
 payload = {
     "first_name": "Test",

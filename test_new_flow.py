@@ -8,7 +8,7 @@ def test_new_payment_flow():
     
     # Step 1: Create payment session (should work without creating order)
     print("=== Step 1: Create Payment Session ===")
-    session_url = "http://localhost:5000/api/v1/payment/create-session"
+    session_url = "https://livebackend.multifolks.com/api/v1/payment/create-session"
     token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjk0Y2ZlMzU4MTZlYWExNDVjMWE3ZjQ0IiwiZW1haWwiOiJwYXJhZGthcnRhbnZpaUBnbWFpbC5jb20iLCJleHAiOjE3NzI1NjU1MjMsImlhdCI6MTc3MjQ3OTEyM30.Hyl2rCGwO5-R5FvRPnMvcqcSU_R91oOnIxc9K48ch6M"
     
     session_data = {
@@ -39,7 +39,7 @@ def test_new_payment_flow():
             
             # Step 2: Test thank you page order creation
             print(f"\n=== Step 2: Create Order from Thank You Page ===")
-            thank_you_url = f"http://localhost:5000/api/v1/orders/create-from-payment/{order_id}"
+            thank_you_url = f"https://livebackend.multifolks.com/api/v1/orders/create-from-payment/{order_id}"
             
             try:
                 response = requests.post(thank_you_url, headers=headers)
