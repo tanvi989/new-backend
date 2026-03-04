@@ -97,9 +97,12 @@ app = FastAPI(title="Multifolks Login API (Fixed with Multi-Route Support)")
 
 logger.info("FastAPI app initialized")
 
+# CORS: use only one value for Access-Control-Allow-Origin. If you use a reverse proxy
+# (e.g. Nginx) that also adds CORS headers, disable CORS there or here to avoid duplicate
+# values (e.g. "http://localhost:3001, *") which causes "only one is allowed" errors.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins without restrictions
+    allow_origins=["*"],  # Allow all origins; do not add CORS again in Nginx/proxy
     allow_credentials=True,  # Allow credentials for authentication
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
