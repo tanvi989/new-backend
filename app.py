@@ -1594,8 +1594,13 @@ async def update_order_payment_status(order_id: str, request: Request, current_u
         }
         
         print(f"[PAYMENT_STATUS] Update data: {update_data}")
-        
-        result = order_service.orders_collection.update_one(
+
+        # Use the main orders collection from OrderService (attribute is `collection`, not `orders_collection`)
+        orders_collection = getattr(order_service, "collection", None)
+        if orders_collection is None:
+            raise Exception("OrderService.collection is not initialized")
+
+        result = orders_collection.update_one(
             {"order_id": order_id, "user_id": user_id},
             {"$set": update_data}
         )
