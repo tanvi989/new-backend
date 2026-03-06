@@ -18,7 +18,7 @@ def test_mobile_cart():
     
     # Step 1: Get cart data with mobile headers
     print("\n1. Getting cart data (mobile simulation):")
-    cart_url = "https://livebackend.multifolks.com/api/v1/cart"
+    cart_url = "https://testbackend.multifolks.com/api/v1/cart"
     
     try:
         response = requests.get(cart_url, headers=mobile_headers)

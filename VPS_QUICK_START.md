@@ -130,7 +130,7 @@ sudo nginx -t
 sudo systemctl restart nginx
 
 # Test API
-curl https://livebackend.multifolks.com/api/health
+curl https://testbackend.multifolks.com/api/health
 ```
 
 ## SSL Setup (Let's Encrypt)

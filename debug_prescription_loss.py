@@ -18,7 +18,7 @@ def debug_prescription_loss():
     
     print("\n🔍 Step 1: Check current cart state...")
     try:
-        cart_url = "https://livebackend.multifolks.com/api/v1/cart"
+        cart_url = "https://testbackend.multifolks.com/api/v1/cart"
         response = requests.get(cart_url, headers=headers)
         
         if response.status_code == 200:

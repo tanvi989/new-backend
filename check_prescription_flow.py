@@ -13,7 +13,7 @@ def check_prescription_flow():
     
     # Step 1: Check current cart data
     print("\n1. Checking Cart Data:")
-    cart_url = "https://livebackend.multifolks.com/api/v1/cart"
+    cart_url = "https://testbackend.multifolks.com/api/v1/cart"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}"

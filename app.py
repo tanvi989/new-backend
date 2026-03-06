@@ -102,7 +102,18 @@ logger.info("FastAPI app initialized")
 # values (e.g. "http://localhost:3001, *") which causes "only one is allowed" errors.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins; do not add CORS again in Nginx/proxy
+    allow_origins=[
+        "https://multifolks.com",
+        "https://www.multifolks.com",
+        "https://live.multifolks.com",
+        "https://test.multifolks.com",
+        "https://mainbackend.multifolks.com",
+        "https://livebackend.multifolks.com",
+        "https://testbackend.multifolks.com",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:3001",
+    ],
     allow_credentials=True,  # Allow credentials for authentication
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers

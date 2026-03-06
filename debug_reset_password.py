@@ -18,7 +18,7 @@ else:
     print("User NOT found!")
 
 # Trigger Forgot Password
-url = "https://livebackend.multifolks.com/api/v1/auth/forgot-password"
+url = "https://testbackend.multifolks.com/api/v1/auth/forgot-password"
 print(f"\nRequesting PIN from {url}...")
 try:
     resp = requests.post(url, json={"email": email, "type": "reset"})

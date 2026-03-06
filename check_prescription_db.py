@@ -18,7 +18,7 @@ def check_prescription_in_db():
     
     print("\n🔍 Step 1: Getting cart data via API...")
     try:
-        cart_url = "https://livebackend.multifolks.com/api/v1/cart"
+        cart_url = "https://testbackend.multifolks.com/api/v1/cart"
         response = requests.get(cart_url, headers=headers)
         
         if response.status_code == 200:

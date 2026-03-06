@@ -16,7 +16,7 @@ def check_payment_session():
     # Check if payment session exists in database
     try:
         # This would require a direct database connection, but let's try a simple endpoint first
-        health_url = "https://livebackend.multifolks.com/api/health"
+        health_url = "https://testbackend.multifolks.com/api/health"
         response = requests.get(health_url)
         
         if response.status_code == 200:
@@ -31,7 +31,7 @@ def check_payment_session():
     
     # Try to create a simple test session first
     print(f"\n=== Creating Test Payment Session ===")
-    session_url = "https://livebackend.multifolks.com/api/v1/payment/create-session"
+    session_url = "https://testbackend.multifolks.com/api/v1/payment/create-session"
     token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjk0Y2ZlMzU4MTZlYWExNDVjMWE3ZjQ0IiwiZW1haWwiOiJwYXJhZGthcnRhbnZpaUBnbWFpbC5jb20iLCJleHAiOjE3NzI1NjU1MjMsImlhdCI6MTc3MjQ3OTEyM30.Hyl2rCGwO5-R5FvRPnMvcqcSU_R91oOnIxc9K48ch6M"
     
     test_data = {
@@ -60,7 +60,7 @@ def check_payment_session():
             
             # Now try to create order from this test session
             print(f"\n=== Creating Order from Test Session ===")
-            order_url = f"https://livebackend.multifolks.com/api/v1/orders/create-from-payment/TEST_ORDER_123"
+            order_url = f"https://testbackend.multifolks.com/api/v1/orders/create-from-payment/TEST_ORDER_123"
             
             try:
                 order_response = requests.post(order_url, headers=headers)

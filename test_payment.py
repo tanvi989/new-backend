@@ -5,7 +5,7 @@ import json
 
 # Test the payment endpoint with the actual user token
 def test_payment():
-    url = "https://livebackend.multifolks.com/api/v1/payment/create-session"
+    url = "https://testbackend.multifolks.com/api/v1/payment/create-session"
     
     # Use the actual token from localStorage
     token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjk0Y2ZlMzU4MTZlYWExNDVjMWE3ZjQ0IiwiZW1haWwiOiJwYXJhZGthcnRhbnZpaUBnbWFpbC5jb20iLCJleHAiOjE3NzI1NjU1MjMsImlhdCI6MTc3MjQ3OTEyM30.Hyl2rCGwO5-R5FvRPnMvcqcSU_R91oOnIxc9K48ch6M"

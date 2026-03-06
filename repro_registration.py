@@ -2,7 +2,7 @@ import requests
 import json
 import time
 
-url = "https://livebackend.multifolks.com/api/v1/auth/simple-register"
+url = "https://testbackend.multifolks.com/api/v1/auth/simple-register"
 headers = {
     "Content-Type": "application/json"
 }

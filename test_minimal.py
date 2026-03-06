@@ -6,7 +6,7 @@ import json
 def test_minimal_session():
     """Test with minimal metadata to isolate the datetime issue"""
     
-    session_url = "https://livebackend.multifolks.com/api/v1/payment/create-session"
+    session_url = "https://testbackend.multifolks.com/api/v1/payment/create-session"
     token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjk0Y2ZlMzU4MTZlYWExNDVjMWE3ZjQ0IiwiZW1haWwiOiJwYXJhZGthcnRhbnZpaUBnbWFpbC5jb20iLCJleHAiOjE3NzI1NjU1MjMsImlhdCI6MTc3MjQ3OTEyM30.Hyl2rCGwO5-R5FvRPnMvcqcSU_R91oOnIxc9K48ch6M"
     
     # Test with absolutely minimal metadata

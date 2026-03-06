@@ -12,7 +12,7 @@ def test_prescription_sync():
     
     # Step 1: Get current cart data
     print("\n1. Getting current cart data:")
-    cart_url = "https://livebackend.multifolks.com/api/v1/cart"
+    cart_url = "https://testbackend.multifolks.com/api/v1/cart"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}"

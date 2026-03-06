@@ -141,7 +141,7 @@ Request a 6-digit PIN for PIN-based login.
 ```json
 {
   "success": true,
-  "msg": "PIN sent successfully"
+  "msg": "OTP sent successfully"
 }
 ```
 
